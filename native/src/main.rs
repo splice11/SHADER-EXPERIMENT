@@ -1,5 +1,6 @@
 mod app;
 mod audio;
+mod palettes;
 mod params;
 mod renderer;
 mod ui;
