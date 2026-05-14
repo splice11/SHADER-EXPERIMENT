@@ -16,6 +16,7 @@ pub struct Renderer {
 
     // Cloud (scene) pass.
     pub scene_pipeline: wgpu::RenderPipeline,
+    pub cube_pipeline: wgpu::RenderPipeline,
     pub cloud_uniform_buf: wgpu::Buffer,
     pub scene_bind_group: wgpu::BindGroup,
 
@@ -128,7 +129,16 @@ impl Renderer {
         let scene_pipeline = make_fullscreen_pipeline(
             &device, &scene_pl, &scene_shader,
             "vs_fullscreen", "fs_clouds",
-            HDR_FORMAT, None, "scene-pipeline",
+            HDR_FORMAT, None, "scene-clouds",
+        );
+        let cube_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("cube.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/cube.wgsl").into()),
+        });
+        let cube_pipeline = make_fullscreen_pipeline(
+            &device, &scene_pl, &cube_shader,
+            "vs_fullscreen", "fs_cube",
+            HDR_FORMAT, None, "scene-cube",
         );
 
         // ---- bloom bind group layout & pipelines ----
@@ -279,7 +289,7 @@ impl Renderer {
 
         Ok(Self {
             window, surface, device, queue, config,
-            scene_pipeline, cloud_uniform_buf, scene_bind_group,
+            scene_pipeline, cube_pipeline, cloud_uniform_buf, scene_bind_group,
             bloom_bgl, extract_pipeline, downsample_pipeline, upsample_pipeline,
             post_uniform_buf, linear_sampler,
             composite_bgl, composite_pipeline,
