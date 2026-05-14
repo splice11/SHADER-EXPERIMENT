@@ -1,0 +1,23 @@
+{
+  "_meta": { "app": "cloud-tunnel-shader", "version": 1, "name": "glitch",
+              "description": "intentionally jerky -- all original wobbles cranked, toxic palette, sharp CA" },
+  "params": {
+    "speed": 2.5, "speedBass": 0.6, "fov": 65.0,
+    "swayAmp": 2.00, "swayFreq": 1.4, "extraSwayX": 0.80,
+    "rollAmp": 0.25, "rollFreq": 0.50,
+    "morph": 0.20, "morphBass": 0.40, "morphCentroid": 0.30,
+    "density": 1.20, "densityBass": 0.40,
+    "noiseScale": 0.65, "dispAmp": 0.14, "octaveScale": 0.45, "octaves": 3,
+    "steps": 100, "stepSize": 0.5, "near": 1.5, "far": 60.0,
+    "colorA": [0.00, 0.10, 0.05],
+    "colorB": [0.20, 1.10, 0.45],
+    "colorAccent": [0.95, 0.05, 0.80],
+    "accentAmt": 0.85,
+    "hueShift": 0.0, "hueCentroid": 2.00,
+    "fogColor": [0.04, 0.10, 0.06], "fogDensity": 0.22,
+    "lightDir": -1.2, "lightStrength": 1.4, "hg": -0.20,
+    "exposure": 1.10, "bloomAmt": 1.0, "bloomThreshold": 0.80,
+    "ca": 0.025, "vignette": 1.00, "grain": 0.08,
+    "gamma": 2.2, "contrast": 1.35, "saturation": 1.40
+  }
+}

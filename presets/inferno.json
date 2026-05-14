@@ -1,0 +1,23 @@
+{
+  "_meta": { "app": "cloud-tunnel-shader", "version": 1, "name": "inferno",
+              "description": "fast, dense, hot orange-red, high audio reactivity" },
+  "params": {
+    "speed": 6.0, "speedBass": 2.0, "fov": 60.0,
+    "swayAmp": 0.0, "swayFreq": 1.0, "extraSwayX": 0.0,
+    "rollAmp": 0.0, "rollFreq": 0.09,
+    "morph": 0.70, "morphBass": 0.50, "morphCentroid": 0.20,
+    "density": 1.80, "densityBass": 0.60,
+    "noiseScale": 0.85, "dispAmp": 0.25, "octaveScale": 0.55, "octaves": 6,
+    "steps": 130, "stepSize": 0.5, "near": 1.5, "far": 60.0,
+    "colorA": [0.050, 0.005, 0.001],
+    "colorB": [1.40, 0.55, 0.15],
+    "colorAccent": [1.60, 0.20, 0.05],
+    "accentAmt": 0.65,
+    "hueShift": 0.0, "hueCentroid": 0.4,
+    "fogColor": [0.18, 0.04, 0.02], "fogDensity": 0.28,
+    "lightDir": 0.2, "lightStrength": 1.6, "hg": 0.60,
+    "exposure": 0.95, "bloomAmt": 1.4, "bloomThreshold": 0.70,
+    "ca": 0.006, "vignette": 0.50, "grain": 0.025,
+    "gamma": 2.2, "contrast": 1.15, "saturation": 1.25
+  }
+}
