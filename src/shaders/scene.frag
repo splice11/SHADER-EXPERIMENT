@@ -9,10 +9,11 @@ out vec4 frag;
 
 uniform vec2  u_res;
 uniform float u_time;
+uniform float u_path;           // strictly monotonic forward position (integrated in JS)
 
 // ---- camera / motion ----------------------------------------------------
-uniform float u_speed;          // forward speed along +Z
-uniform float u_speedBass;      // bass-driven extra forward speed
+uniform float u_speed;          // forward speed (read by JS to integrate u_path)
+uniform float u_speedBass;      // bass-driven extra speed (read by JS, uses lowpassed bass)
 uniform float u_fov;            // vertical fov in degrees
 uniform float u_swayAmp;        // amplitude of original Nimitz pc_disp xy sway (0 = straight)
 uniform float u_swayFreq;       // sway temporal frequency multiplier
@@ -38,17 +39,29 @@ uniform float u_near;           // starting t
 uniform float u_far;            // hard far clip
 
 // ---- shading ------------------------------------------------------------
-uniform vec3  u_colorA;         // shadow / deep colour
-uniform vec3  u_colorB;         // lit / highlight colour
-uniform vec3  u_colorAccent;    // accent (added on top)
-uniform float u_accentAmt;
+// Cloud shading follows the original Nimitz formula:
+//   col = palette * den^4 * linstep * (u_colorA + u_colorB * dif * lightStrength * phase)
+// where `palette` is a per-voxel rainbow sin() that gives clouds their
+// internal hue variation. Final image gets a BGR/RGB iLerp blend and a
+// per-channel gamma + warm tint.
+uniform vec3  u_colorA;         // cold ambient (was [0.005, 0.045, 0.075])
+uniform vec3  u_colorB;         // warm sun-side diffuse (was 1.5 * [0.033, 0.07, 0.03])
+uniform vec3  u_colorAccent;    // tint multiplied into the rainbow palette
+uniform float u_paletteBaseR;   // sin phase for R channel (was 5.0)
+uniform float u_paletteBaseG;   // sin phase for G channel (was 0.4)
+uniform float u_paletteBaseB;   // sin phase for B channel (was 0.2)
+uniform float u_paletteAmt;     // 0 = flat palette, 1 = full rainbow
+uniform vec3  u_warmTint;       // final scene tint (was vec3(1.0, 0.97, 0.9))
+uniform float u_gammaR;         // per-channel gamma — R (was 0.55)
+uniform float u_gammaG;         // per-channel gamma — G (was 0.65)
+uniform float u_gammaB;         // per-channel gamma — B (was 0.6)
 uniform float u_hueShift;       // extra hue rotation (radians)
 uniform float u_hueCentroid;    // centroid amount onto hue
 uniform vec3  u_fogColor;
 uniform float u_fogDensity;
 uniform float u_lightDir;       // light direction angle around Y (radians)
 uniform float u_lightStrength;
-uniform float u_hg;             // Henyey-Greenstein g (-1..1)
+uniform float u_hg;             // Henyey-Greenstein g (-1..1); 0 ≈ original isotropic
 
 // ---- music --------------------------------------------------------------
 uniform float u_bass;
@@ -70,6 +83,26 @@ vec3 hueRotate(vec3 c, float a){
     const vec3 k = vec3(0.57735026919);
     float co = cos(a), si = sin(a);
     return c*co + cross(k, c)*si + k*dot(k, c)*(1.0 - co);
+}
+
+// Saturation-aware lerp — Nimitz's "Will It Blend" trick. Mixes a and b
+// while preserving perceived saturation; pushed toward dominant-channel
+// direction to compensate for the brightness loss of a naive mix.
+float getsat(vec3 c){
+    float mi = min(min(c.x, c.y), c.z);
+    float ma = max(max(c.x, c.y), c.z);
+    return (ma - mi) / (ma + 1e-7);
+}
+vec3 iLerp(vec3 a, vec3 b, float x){
+    vec3 ic = mix(a, b, x) + vec3(1e-6, 0.0, 0.0);
+    float sd  = abs(getsat(ic) - mix(getsat(a), getsat(b), x));
+    vec3  dir = normalize(vec3(2.0*ic.x - ic.y - ic.z,
+                               2.0*ic.y - ic.x - ic.z,
+                               2.0*ic.z - ic.y - ic.x));
+    float lgt = dot(vec3(1.0), ic);
+    float ff  = dot(dir, normalize(ic));
+    ic += 1.5 * dir * sd * ff * lgt;
+    return clamp(ic, 0.0, 1.0);
 }
 
 // ---- Nimitz Protean Clouds field ---------------------------------------
@@ -112,12 +145,16 @@ float hgPhase(float costh, float g){
     return (1.0 - g2) / (4.0 * PI * pow(1.0 + g2 - 2.0*g*costh, 1.5));
 }
 
-// Volumetric raymarch with crude self-shadowing (one extra sample per step).
+// Volumetric raymarch with cheap self-shadowing (one extra sample per step).
+// Structure follows the original Nimitz render() so the cloud body keeps its
+// per-voxel hue variation and warm/cool ambient+diffuse shading.
 vec4 march(vec3 ro, vec3 rd, float prm1, vec3 lightDir){
     vec4 rez = vec4(0.0);
     float t = u_near;
     float fogT = 0.0;
-    float phase = mix(1.0/(4.0*PI), hgPhase(dot(rd, lightDir), u_hg), 1.0);
+    vec3 paletteBase = vec3(u_paletteBaseR, u_paletteBaseG, u_paletteBaseB);
+    // 4π normalises HG to 1.0 when g=0 (isotropic) so default matches Nimitz.
+    float phaseHG = hgPhase(dot(rd, lightDir), u_hg) * 4.0 * PI;
     for (int i = 0; i < 256; i++){
         if (i >= u_steps) break;
         if (rez.a > 0.99) break;
@@ -127,20 +164,24 @@ vec4 march(vec3 ro, vec3 rd, float prm1, vec3 lightDir){
         float dn  = clamp(mp.x + 2.0, 0.0, 3.0);
         vec4 col = vec4(0.0);
         if (mp.x > 0.6){
-            // cheap shading: gradient-of-density toward light
-            float dif1 = clamp((den - field(pos + lightDir*0.8, prm1).x) / 9.0, 0.001, 1.0);
+            // Per-voxel rainbow palette — different sin phase per channel
+            // (paletteBase) plus radial and depth modulation give clouds
+            // their characteristic warm-cool internal variation.
+            vec3 palette = 0.5 + 0.5 * sin(paletteBase
+                                           + mp.y*0.1
+                                           + sin(pos.z*0.4)*0.5);
+            palette = mix(vec3(1.0), palette, u_paletteAmt) * u_colorAccent;
+
+            // Cheap two-tap self-shadowing toward light direction.
+            float dif1 = clamp((den - field(pos + lightDir*0.8,  prm1).x) / 9.0, 0.001, 1.0);
             float dif2 = clamp((den - field(pos + lightDir*0.35, prm1).x) / 2.5, 0.001, 1.0);
-            float shade = (dif1 + dif2) * u_lightStrength * phase * 4.0;
+            float dif  = dif1 + dif2;
 
-            // base palette ramp by radial / depth
-            vec3 base = mix(u_colorA, u_colorB, smoothstep(0.0, 1.0, den));
-            base += u_colorAccent * u_accentAmt
-                  * (0.5 + 0.5*sin(vec3(5.0, 0.4, 0.2) + mp.y*0.1 + pos.z*0.4)).x;
-
-            col.rgb = base * (0.20 + shade);
-            col.a   = den * 0.10;
-            col.rgb *= den * den * den * 3.0;
-            col.rgb *= linstep(4.0, -2.5, mp.x) * 2.3;
+            col = vec4(palette, 0.08);
+            col      *= den * den * den;
+            col.rgb  *= linstep(4.0, -2.5, mp.x) * 2.3;
+            // Two-tone shading: cold ambient + warm sun-side diffuse.
+            col.rgb  *= den * (u_colorA + u_colorB * dif * u_lightStrength * phaseHG);
         }
         // fog (exp depth)
         float fogC = exp(t * u_fogDensity - 2.2);
@@ -160,8 +201,8 @@ void main(){
     // --- morph factor (replaces Nimitz's prm1) ---
     float prm1 = clamp(u_morph + u_morphBass*u_bass + u_morphCentroid*u_centroid, 0.0, 1.0);
 
-    // --- monotonic forward time ---
-    float fwd = u_time * (u_speed + u_speedBass*u_bass);
+    // --- monotonic forward position (integrated in JS, can never go backward) ---
+    float fwd = u_path;
 
     // --- camera: straight along +Z by default, optional gentle sway ---
     vec3 ro = vec3(0.0, 0.0, fwd);
@@ -183,7 +224,16 @@ void main(){
     vec3 lightDir = normalize(vec3(cos(la), 0.35, sin(la)));
 
     vec4 scn = march(ro, rd, prm1, lightDir);
-    // bass-driven brightness/density mult on the result.
+
+    // Nimitz BGR/RGB saturation-aware blend — gives the cool/warm push
+    // that makes cloud cores read as warm gold while shadows stay cool blue.
+    scn.rgb = iLerp(scn.bgr, scn.rgb, clamp(1.0 - prm1, 0.05, 1.0));
+
+    // Per-channel gamma + warm tint. With defaults (0.55, 0.65, 0.6) and
+    // tint (1.0, 0.97, 0.9) this matches the original look.
+    scn.rgb = pow(max(scn.rgb, 0.0), vec3(u_gammaR, u_gammaG, u_gammaB)) * u_warmTint;
+
+    // bass-driven brightness mult on the result.
     scn.rgb *= 1.0 + u_densityBass * u_bass;
 
     // colour-space hue twist driven by centroid/punch

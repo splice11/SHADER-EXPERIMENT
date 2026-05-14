@@ -1,0 +1,26 @@
+{
+  "_meta": { "app": "cloud-tunnel-shader", "version": 2, "name": "dream",
+              "description": "soft pastel, slow, palette mostly flat for a gentle gradient feel" },
+  "params": {
+    "speed": 0.7, "speedBass": 0.15, "fov": 70.0,
+    "swayAmp": 0.0, "swayFreq": 1.0, "extraSwayX": 0.0,
+    "rollAmp": 0.0, "rollFreq": 0.09,
+    "morph": 0.40, "morphBass": 0.10, "morphCentroid": 0.15,
+    "density": 0.85, "densityBass": 0.15,
+    "noiseScale": 0.50, "dispAmp": 0.06, "octaveScale": 0.60, "octaves": 5,
+    "steps": 110, "stepSize": 0.5, "near": 1.5, "far": 60.0,
+    "colorA": [0.020, 0.020, 0.030],
+    "colorB": [0.080, 0.060, 0.080],
+    "colorAccent": [1.00, 0.90, 1.00],
+    "paletteBaseR": 3.0, "paletteBaseG": 2.5, "paletteBaseB": 1.0,
+    "paletteAmt": 0.40,
+    "warmTint": [1.05, 1.00, 1.00],
+    "gammaR": 0.55, "gammaG": 0.55, "gammaB": 0.55,
+    "hueShift": 0.0, "hueCentroid": 0.70,
+    "fogColor": [0.18, 0.16, 0.22], "fogDensity": 0.18,
+    "lightDir": 1.8, "lightStrength": 1.1, "hg": 0.20,
+    "exposure": 1.00, "bloomAmt": 1.00, "bloomThreshold": 0.65,
+    "ca": 0.003, "vignette": 0.30, "grain": 0.02,
+    "gamma": 2.0, "contrast": 0.90, "saturation": 0.85
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "_meta": { "app": "cloud-tunnel-shader", "version": 2, "name": "club-pulse",
+              "description": "magenta + cyan rainbow, audio-reactive shape/density, smooth path" },
+  "params": {
+    "speed": 1.8, "speedBass": 1.00, "fov": 55.0,
+    "swayAmp": 0.0, "swayFreq": 1.0, "extraSwayX": 0.0,
+    "rollAmp": 0.0, "rollFreq": 0.09,
+    "morph": 0.35, "morphBass": 0.45, "morphCentroid": 0.25,
+    "density": 1.00, "densityBass": 0.35,
+    "noiseScale": 0.65, "dispAmp": 0.12, "octaveScale": 0.58, "octaves": 5,
+    "steps": 120, "stepSize": 0.5, "near": 1.5, "far": 60.0,
+    "colorA": [0.010, 0.005, 0.030],
+    "colorB": [0.040, 0.020, 0.100],
+    "colorAccent": [1.10, 0.50, 1.10],
+    "paletteBaseR": 2.0, "paletteBaseG": -1.0, "paletteBaseB": 1.0,
+    "paletteAmt": 0.90,
+    "warmTint": [1.00, 0.85, 1.10],
+    "gammaR": 0.55, "gammaG": 0.65, "gammaB": 0.55,
+    "hueShift": 0.0, "hueCentroid": 1.20,
+    "fogColor": [0.05, 0.04, 0.10], "fogDensity": 0.22,
+    "lightDir": 0.3, "lightStrength": 1.3, "hg": 0.40,
+    "exposure": 1.05, "bloomAmt": 0.85, "bloomThreshold": 0.70,
+    "ca": 0.010, "vignette": 0.55, "grain": 0.03,
+    "gamma": 2.2, "contrast": 1.15, "saturation": 1.25
+  }
+}

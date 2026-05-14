@@ -75,12 +75,16 @@ start.addEventListener('click', async () => {
 // --- render loop ------------------------------------------------------
 let last = performance.now();
 let fpsAccum = 0, fpsCount = 0, fpsT = 0;
+let pathPos = 0;   // strictly monotonic forward distance, integrated each frame.
 function frame(now) {
   const dt = Math.min(0.1, (now - last) * 0.001);
   last = now;
   const t = now * 0.001;
   const features = audio.update(dt);
-  renderer.render(state, features, t);
+  // velocity uses the slow bass envelope so beat transients don't jolt the camera
+  const velocity = state.speed + state.speedBass * features.bassSmooth;
+  pathPos += velocity * dt;
+  renderer.render(state, features, t, pathPos);
 
   fpsAccum += dt; fpsCount++; fpsT += dt;
   if (fpsT >= 0.5) {

@@ -32,17 +32,26 @@ export const PARAM_DEFS = {
   far:          { group: 'raymarch', type: 'float', value: 60.0,min: 10.0,max: 200.0,step: 0.5 },
 
   // ---- shading ---------------------------------------------------------
-  colorA:       { group: 'shading', type: 'color', value: [0.005, 0.012, 0.030] },
-  colorB:       { group: 'shading', type: 'color', value: [0.85,  0.92,  1.05]  },
-  colorAccent:  { group: 'shading', type: 'color', value: [0.30,  0.42,  0.95]  },
-  accentAmt:    { group: 'shading', type: 'float', value: 0.30,  min: 0.0, max: 2.0, step: 0.001 },
+  // Defaults are matched to Nimitz's original "Protean Clouds" so a fresh
+  // load gives the warm-gold-clouds-in-cool-fog look out of the box.
+  colorA:       { group: 'shading', type: 'color', value: [0.005, 0.045, 0.075], label: 'ambient (cool)' },
+  colorB:       { group: 'shading', type: 'color', value: [0.050, 0.105, 0.045], label: 'diffuse (warm)' },
+  colorAccent:  { group: 'shading', type: 'color', value: [1.000, 1.000, 1.000], label: 'palette tint' },
+  paletteBaseR: { group: 'shading', type: 'float', value: 5.0,  min: -6.28, max: 6.28, step: 0.01, label: 'palette R phase' },
+  paletteBaseG: { group: 'shading', type: 'float', value: 0.4,  min: -6.28, max: 6.28, step: 0.01, label: 'palette G phase' },
+  paletteBaseB: { group: 'shading', type: 'float', value: 0.2,  min: -6.28, max: 6.28, step: 0.01, label: 'palette B phase' },
+  paletteAmt:   { group: 'shading', type: 'float', value: 1.0,  min: 0.0, max: 1.0, step: 0.001, label: 'palette amount' },
+  warmTint:     { group: 'shading', type: 'color', value: [1.000, 0.970, 0.900], label: 'final tint' },
+  gammaR:       { group: 'shading', type: 'float', value: 0.55, min: 0.2, max: 2.5, step: 0.001, label: 'scene gamma R' },
+  gammaG:       { group: 'shading', type: 'float', value: 0.65, min: 0.2, max: 2.5, step: 0.001, label: 'scene gamma G' },
+  gammaB:       { group: 'shading', type: 'float', value: 0.60, min: 0.2, max: 2.5, step: 0.001, label: 'scene gamma B' },
   hueShift:     { group: 'shading', type: 'angle', value: 0.0,   min: -3.1416, max: 3.1416, step: 0.001 },
   hueCentroid:  { group: 'shading', type: 'float', value: 0.5,   min: 0.0, max: 3.14,   step: 0.001, label: 'hue × centroid' },
   fogColor:     { group: 'shading', type: 'color', value: [0.06, 0.11, 0.13] },
   fogDensity:   { group: 'shading', type: 'float', value: 0.20,  min: 0.0, max: 1.0, step: 0.001 },
   lightDir:     { group: 'shading', type: 'angle', value: 0.7,   min: -3.1416, max: 3.1416, step: 0.001 },
   lightStrength:{ group: 'shading', type: 'float', value: 1.0,   min: 0.0, max: 3.0, step: 0.001 },
-  hg:           { group: 'shading', type: 'float', value: 0.30,  min: -0.95, max: 0.95, step: 0.001, label: 'HG g' },
+  hg:           { group: 'shading', type: 'float', value: 0.0,   min: -0.95, max: 0.95, step: 0.001, label: 'HG g' },
 
   // ---- post ------------------------------------------------------------
   exposure:       { group: 'post', type: 'float', value: 1.10, min: 0.1, max: 4.0, step: 0.001 },
@@ -74,7 +83,7 @@ export function applyPreset(state, preset) {
 }
 
 export function exportPreset(state, meta = {}) {
-  const out = { _meta: { app: 'cloud-tunnel-shader', version: 1, ...meta }, params: {} };
+  const out = { _meta: { app: 'cloud-tunnel-shader', version: 2, ...meta }, params: {} };
   for (const k of Object.keys(PARAM_DEFS)) out.params[k] = state[k];
   return out;
 }

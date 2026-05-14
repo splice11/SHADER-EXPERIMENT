@@ -1,0 +1,26 @@
+{
+  "_meta": { "app": "cloud-tunnel-shader", "version": 2, "name": "glitch",
+              "description": "intentionally jerky -- all wobbles cranked, toxic palette, sharp CA" },
+  "params": {
+    "speed": 2.0, "speedBass": 0.20, "fov": 65.0,
+    "swayAmp": 1.50, "swayFreq": 1.3, "extraSwayX": 0.60,
+    "rollAmp": 0.18, "rollFreq": 0.45,
+    "morph": 0.25, "morphBass": 0.30, "morphCentroid": 0.25,
+    "density": 1.05, "densityBass": 0.25,
+    "noiseScale": 0.65, "dispAmp": 0.14, "octaveScale": 0.50, "octaves": 4,
+    "steps": 100, "stepSize": 0.5, "near": 1.5, "far": 60.0,
+    "colorA": [0.010, 0.050, 0.025],
+    "colorB": [0.020, 0.105, 0.040],
+    "colorAccent": [1.10, 0.60, 1.30],
+    "paletteBaseR": 0.8, "paletteBaseG": 3.1, "paletteBaseB": -2.0,
+    "paletteAmt": 1.00,
+    "warmTint": [0.90, 1.05, 1.10],
+    "gammaR": 0.50, "gammaG": 0.50, "gammaB": 0.55,
+    "hueShift": 0.0, "hueCentroid": 1.50,
+    "fogColor": [0.04, 0.08, 0.05], "fogDensity": 0.22,
+    "lightDir": -1.2, "lightStrength": 1.2, "hg": -0.15,
+    "exposure": 1.00, "bloomAmt": 0.75, "bloomThreshold": 0.75,
+    "ca": 0.018, "vignette": 0.85, "grain": 0.06,
+    "gamma": 2.2, "contrast": 1.25, "saturation": 1.30
+  }
+}
