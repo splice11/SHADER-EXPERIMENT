@@ -1,6 +1,8 @@
 use crate::palettes::PALETTES;
 use bytemuck::{Pod, Zeroable};
 
+pub const BOLT_PATH_LEN: usize = 8;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct CloudParams {
@@ -28,23 +30,37 @@ pub struct CloudParams {
     pub centroid_to_hue: f32,
     pub rms_to_density: f32,
 
-    // Lightning — flash injected as emissive into the volume.
-    pub flash_pos: [f32; 3],
-    pub flash_strength: f32,
+    // Camera basis is computed CPU-side (smoothed follow + director kicks).
+    pub cam_pos: [f32; 3],
+    pub cam_zoom: f32,
 
-    pub flash_color: [f32; 3],
-    pub bolt_intensity: f32,
-
-    pub bolt_anchor: [f32; 2],
-    pub bolt_seed: f32,
-    pub bolt_width: f32,
-
-    pub palette_amount: f32, // 0 = original Nimitz grade, 1 = full palette
-    pub palette_centroid_drive: f32,
+    pub cam_right: [f32; 3],
     pub _pad3: f32,
+
+    pub cam_up: [f32; 3],
     pub _pad4: f32,
 
-    // 5 palette stops (vec3 + pad each so they're vec4-aligned).
+    pub cam_fwd: [f32; 3],
+    pub vignette: f32,
+
+    // Lightning
+    pub flash_color: [f32; 3],
+    pub flash_strength: f32,
+
+    pub bolt_intensity: f32,
+    pub bolt_width: f32,
+    pub bolt_glow: f32,
+    pub bolt_count: f32,
+
+    // 8 path control points (xyz + unused).
+    pub bolt_path: [[f32; 4]; BOLT_PATH_LEN],
+
+    // Palette
+    pub palette_amount: f32,
+    pub palette_centroid_drive: f32,
+    pub _pad5: f32,
+    pub _pad6: f32,
+
     pub palette0: [f32; 3], pub _ps0: f32,
     pub palette1: [f32; 3], pub _ps1: f32,
     pub palette2: [f32; 3], pub _ps2: f32,
@@ -70,17 +86,27 @@ impl Default for CloudParams {
             centroid_to_hue: 0.0,
             rms_to_density: 0.5,
 
-            flash_pos: [0.0, 0.0, 0.0],
-            flash_strength: 0.0,
+            cam_pos: [0.0, 0.0, 0.0],
+            cam_zoom: 1.0,
+            cam_right: [1.0, 0.0, 0.0],
+            _pad3: 0.0,
+            cam_up: [0.0, 1.0, 0.0],
+            _pad4: 0.0,
+            cam_fwd: [0.0, 0.0, 1.0],
+            vignette: 0.7,
+
             flash_color: [0.78, 0.88, 1.20],
-            bolt_intensity: 2.5,
-            bolt_anchor: [0.5, 0.5],
-            bolt_seed: 0.0,
-            bolt_width: 0.0025,
+            flash_strength: 0.0,
+            bolt_intensity: 4.0,
+            bolt_width: 0.18,
+            bolt_glow: 1.2,
+            bolt_count: 0.0,
+
+            bolt_path: [[0.0; 4]; BOLT_PATH_LEN],
 
             palette_amount: 0.85,
             palette_centroid_drive: 0.25,
-            _pad3: 0.0, _pad4: 0.0,
+            _pad5: 0.0, _pad6: 0.0,
 
             palette0: p[0], _ps0: 0.0,
             palette1: p[1], _ps1: 0.0,
@@ -108,6 +134,20 @@ pub struct PostParams {
     pub knee: f32,
     pub intensity: f32,
     pub exposure: f32,
+
+    pub contrast: f32,
+    pub saturation: f32,
+    pub grain: f32,
+    pub time: f32,
+
+    pub aberration: f32,
+    pub letterbox_aspect: f32, // 0 = off; >0 = target aspect (e.g. 2.39)
+    pub anamorphic: f32,
+    pub vignette: f32,
+
+    pub resolution: [f32; 2],
+    pub _pad0: f32,
+    pub _pad1: f32,
 }
 
 impl Default for PostParams {
@@ -115,8 +155,22 @@ impl Default for PostParams {
         Self {
             threshold: 1.0,
             knee: 0.4,
-            intensity: 0.45,
+            intensity: 0.55,
             exposure: 1.0,
+
+            contrast: 1.08,
+            saturation: 1.05,
+            grain: 0.04,
+            time: 0.0,
+
+            aberration: 0.0,
+            letterbox_aspect: 0.0,
+            anamorphic: 0.25,
+            vignette: 0.0, // applied in scene shader; this is a post add-on if wanted
+
+            resolution: [1.0, 1.0],
+            _pad0: 0.0,
+            _pad1: 0.0,
         }
     }
 }

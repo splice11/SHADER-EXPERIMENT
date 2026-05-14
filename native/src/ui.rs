@@ -1,4 +1,4 @@
-use crate::app::Lightning;
+use crate::app::{Camera, Director, DirectorFeel, Lightning};
 use crate::palettes::PALETTES;
 use crate::params::{CloudParams, PostParams};
 
@@ -7,14 +7,17 @@ pub fn build(
     p: &mut CloudParams,
     post: &mut PostParams,
     lightning: &mut Lightning,
+    director: &mut Director,
+    camera: &mut Camera,
     palette_index: &mut usize,
     audio_source: &str,
 ) {
     egui::SidePanel::right("controls")
-        .default_width(320.0)
+        .default_width(330.0)
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("protean clouds");
+                ui.small("F11 fullscreen · H hide ui · L manual lightning · Esc exit");
                 ui.separator();
 
                 egui::CollapsingHeader::new("audio").default_open(true).show(ui, |ui| {
@@ -27,6 +30,30 @@ pub fn build(
                     bar(ui, "punch", p.punch);
                 });
 
+                egui::CollapsingHeader::new("director").default_open(true).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("feel");
+                        ui.selectable_value(&mut director.feel, DirectorFeel::Off, "Off");
+                        ui.selectable_value(&mut director.feel, DirectorFeel::Subtle, "Subtle");
+                        ui.selectable_value(&mut director.feel, DirectorFeel::Cinematic, "Cinema");
+                        ui.selectable_value(&mut director.feel, DirectorFeel::Theatrical, "Theatre");
+                    });
+                    bar(ui, "swell", director.swell);
+                    bar(ui, "drop", director.drop);
+                    bar(ui, "lull", director.lull);
+                });
+
+                egui::CollapsingHeader::new("camera").default_open(true).show(ui, |ui| {
+                    ui.label("sway amplitude");
+                    ui.add(egui::Slider::new(&mut camera.sway_amp, 0.0..=1.5));
+                    ui.label("follow inertia (s)");
+                    ui.add(egui::Slider::new(&mut camera.follow_secs, 0.02..=1.5).logarithmic(true));
+                    ui.label("base zoom");
+                    ui.add(egui::Slider::new(&mut p.cam_zoom, 0.4..=2.0));
+                    ui.label("vignette");
+                    ui.add(egui::Slider::new(&mut p.vignette, 0.0..=1.0));
+                });
+
                 egui::CollapsingHeader::new("palette").default_open(true).show(ui, |ui| {
                     egui::ComboBox::from_label("preset")
                         .selected_text(PALETTES[*palette_index].name)
@@ -35,7 +62,7 @@ pub fn build(
                                 ui.selectable_value(palette_index, i, pal.name);
                             }
                         });
-                    ui.label("palette amount (0 = Nimitz grade, 1 = full)");
+                    ui.label("palette amount");
                     ui.add(egui::Slider::new(&mut p.palette_amount, 0.0..=1.0));
                     ui.label("centroid → palette offset");
                     ui.add(egui::Slider::new(&mut p.palette_centroid_drive, -1.0..=1.0));
@@ -44,30 +71,45 @@ pub fn build(
                 });
 
                 egui::CollapsingHeader::new("lightning").default_open(true).show(ui, |ui| {
-                    ui.checkbox(&mut lightning.auto, "trigger on audio onsets");
+                    ui.checkbox(&mut lightning.auto, "auto-trigger on audio");
                     ui.label("punch threshold");
                     ui.add(egui::Slider::new(&mut lightning.threshold, 0.05..=1.5));
                     ui.label("cooldown (s)");
                     ui.add(egui::Slider::new(&mut lightning.cooldown_secs, 0.05..=2.0));
                     ui.label("peak intensity");
                     ui.add(egui::Slider::new(&mut lightning.peak_intensity, 0.1..=4.0));
-                    ui.label("bolt width");
-                    ui.add(egui::Slider::new(&mut p.bolt_width, 0.0005..=0.02).logarithmic(true));
-                    ui.label("bolt intensity");
-                    ui.add(egui::Slider::new(&mut p.bolt_intensity, 0.0..=8.0));
+                    ui.label("bolt core width");
+                    ui.add(egui::Slider::new(&mut p.bolt_width, 0.02..=1.5).logarithmic(true));
+                    ui.label("bolt core intensity");
+                    ui.add(egui::Slider::new(&mut p.bolt_intensity, 0.0..=12.0));
+                    ui.label("bolt cloud glow");
+                    ui.add(egui::Slider::new(&mut p.bolt_glow, 0.0..=4.0));
                     color_picker(ui, "flash colour", &mut p.flash_color);
-                    if ui.button("⚡ trigger now").clicked() {
-                        lightning.timer = 0.0;
-                        lightning.strength = lightning.peak_intensity;
-                        lightning.cooldown = lightning.cooldown_secs;
-                        lightning.seed_counter = lightning.seed_counter.wrapping_add(1);
-                        p.bolt_seed = lightning.seed_counter as f32;
-                        p.bolt_anchor = [0.4 + (p.bolt_seed.fract() * 0.2), 0.25];
-                        p.flash_pos = [0.0, 0.0, p.time * (p.speed + p.bass * p.bass_to_speed) + 8.0];
-                    }
                 });
 
-                egui::CollapsingHeader::new("bloom + tonemap").default_open(true).show(ui, |ui| {
+                egui::CollapsingHeader::new("cinematic").default_open(true).show(ui, |ui| {
+                    ui.label("letterbox aspect (0 = off)");
+                    ui.add(egui::Slider::new(&mut post.letterbox_aspect, 0.0..=3.0));
+                    ui.horizontal(|ui| {
+                        if ui.small_button("off").clicked() { post.letterbox_aspect = 0.0; }
+                        if ui.small_button("16:9").clicked() { post.letterbox_aspect = 16.0/9.0; }
+                        if ui.small_button("2.00").clicked() { post.letterbox_aspect = 2.00; }
+                        if ui.small_button("2.39").clicked() { post.letterbox_aspect = 2.39; }
+                        if ui.small_button("2.76").clicked() { post.letterbox_aspect = 2.76; }
+                    });
+                    ui.label("film grain");
+                    ui.add(egui::Slider::new(&mut post.grain, 0.0..=0.2));
+                    ui.label("contrast");
+                    ui.add(egui::Slider::new(&mut post.contrast, 0.5..=2.0));
+                    ui.label("saturation");
+                    ui.add(egui::Slider::new(&mut post.saturation, 0.0..=2.0));
+                    ui.label("anamorphic streak");
+                    ui.add(egui::Slider::new(&mut post.anamorphic, 0.0..=1.5));
+                    ui.label("chromatic aberration (base)");
+                    ui.add(egui::Slider::new(&mut post.aberration, 0.0..=1.5));
+                });
+
+                egui::CollapsingHeader::new("bloom + tonemap").default_open(false).show(ui, |ui| {
                     ui.label("threshold");
                     ui.add(egui::Slider::new(&mut post.threshold, 0.0..=4.0));
                     ui.label("knee");
@@ -100,9 +142,26 @@ pub fn build(
 
                 ui.separator();
                 ui.small(
-                    "Audio capture uses your default ALSA/PipeWire input. \
-                     For system audio, point pavucontrol Recording at \
+                    "For system audio, point pavucontrol Recording at \
                      'Monitor of <output sink>'.",
+                );
+            });
+        });
+}
+
+pub fn hint_overlay(ctx: &egui::Context) {
+    egui::Area::new("hint".into())
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(12.0, -12.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            let frame = egui::Frame::none()
+                .fill(egui::Color32::from_black_alpha(140))
+                .inner_margin(egui::Margin::symmetric(8.0, 5.0))
+                .rounding(4.0);
+            frame.show(ui, |ui| {
+                ui.colored_label(
+                    egui::Color32::from_white_alpha(200),
+                    "H show ui · F11 fullscreen · L lightning · Esc exit",
                 );
             });
         });

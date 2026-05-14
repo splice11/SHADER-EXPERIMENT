@@ -1,11 +1,26 @@
-// Final composite: HDR scene + bloom → tonemap → swapchain (sRGB target
-// handles the gamma conversion).
+// Composite: HDR scene + bloom → tonemap → contrast/saturation → grain →
+// letterbox → swapchain (sRGB on the way out). Adds anamorphic-stretched
+// bloom contribution and per-pixel chromatic aberration.
 
 struct PostParams {
     threshold: f32,
     knee: f32,
     intensity: f32,
     exposure: f32,
+
+    contrast: f32,
+    saturation: f32,
+    grain: f32,
+    time: f32,
+
+    aberration: f32,
+    letterbox_aspect: f32,
+    anamorphic: f32,
+    vignette: f32,
+
+    resolution: vec2<f32>,
+    _pad0: f32,
+    _pad1: f32,
 };
 
 @group(0) @binding(0) var scene_tex: texture_2d<f32>;
@@ -35,10 +50,76 @@ fn aces(x: vec3<f32>) -> vec3<f32> {
                  vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+fn hash21(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+    p3 = p3 + dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+fn sample_scene_aberrated(uv: vec2<f32>) -> vec3<f32> {
+    if (P.aberration <= 0.0001) {
+        return textureSample(scene_tex, scene_smp, uv).rgb;
+    }
+    let center = vec2<f32>(0.5);
+    let dir = uv - center;
+    let amt = P.aberration * 0.012;
+    let r = textureSample(scene_tex, scene_smp, uv - dir * amt).r;
+    let g = textureSample(scene_tex, scene_smp, uv).g;
+    let b = textureSample(scene_tex, scene_smp, uv + dir * amt).b;
+    return vec3<f32>(r, g, b);
+}
+
+fn sample_bloom_anamorphic(uv: vec2<f32>) -> vec3<f32> {
+    let base = textureSample(bloom_tex, bloom_smp, uv).rgb;
+    if (P.anamorphic <= 0.0001) {
+        return base;
+    }
+    var streak = vec3<f32>(0.0);
+    var w_sum = 0.0;
+    for (var i = -5; i <= 5; i = i + 1) {
+        let off = f32(i) * 0.012;
+        let w = exp(-f32(i * i) * 0.18);
+        streak = streak + textureSample(bloom_tex, bloom_smp, uv + vec2<f32>(off, 0.0)).rgb * w;
+        w_sum = w_sum + w;
+    }
+    streak = streak / w_sum;
+    return base + streak * P.anamorphic;
+}
+
 @fragment
 fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
-    let scn = textureSample(scene_tex, scene_smp, in.uv).rgb;
-    let blm = textureSample(bloom_tex, bloom_smp, in.uv).rgb;
-    let exposed = (scn + blm * P.intensity) * P.exposure;
-    return vec4<f32>(aces(exposed), 1.0);
+    let uv = in.uv;
+
+    // Letterbox bars (drawn early so we don't waste GPU on later steps where
+    // they'd be overwritten anyway — but cost is negligible either way).
+    let aspect_screen = P.resolution.x / max(P.resolution.y, 1.0);
+    if (P.letterbox_aspect > 0.5) {
+        let bar = max(0.0, 1.0 - aspect_screen / P.letterbox_aspect) * 0.5;
+        if (uv.y < bar || uv.y > 1.0 - bar) {
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+        }
+    }
+
+    let scn = sample_scene_aberrated(uv);
+    let blm = sample_bloom_anamorphic(uv);
+
+    var col = (scn + blm * P.intensity) * P.exposure;
+    col = aces(col);
+
+    // Saturation around luma.
+    let luma = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
+    col = mix(vec3<f32>(luma), col, P.saturation);
+    // Contrast around mid-grey.
+    col = (col - vec3<f32>(0.5)) * P.contrast + vec3<f32>(0.5);
+    col = clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    // Animated film grain. Scale by 1/luma a bit so it shows in the dark areas
+    // more than in highlights — that's how real film stock looks.
+    if (P.grain > 0.0001) {
+        let g = (hash21(uv * P.resolution + vec2<f32>(P.time * 137.31, P.time * 91.7)) - 0.5);
+        let scale = mix(1.4, 0.6, smoothstep(0.0, 0.7, luma));
+        col = col + vec3<f32>(g) * P.grain * scale;
+    }
+
+    return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
