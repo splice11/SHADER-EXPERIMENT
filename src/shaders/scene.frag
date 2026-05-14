@@ -9,10 +9,11 @@ out vec4 frag;
 
 uniform vec2  u_res;
 uniform float u_time;
+uniform float u_path;           // strictly monotonic forward position (integrated in JS)
 
 // ---- camera / motion ----------------------------------------------------
-uniform float u_speed;          // forward speed along +Z
-uniform float u_speedBass;      // bass-driven extra forward speed
+uniform float u_speed;          // forward speed (read by JS to integrate u_path)
+uniform float u_speedBass;      // bass-driven extra speed (read by JS, uses lowpassed bass)
 uniform float u_fov;            // vertical fov in degrees
 uniform float u_swayAmp;        // amplitude of original Nimitz pc_disp xy sway (0 = straight)
 uniform float u_swayFreq;       // sway temporal frequency multiplier
@@ -160,8 +161,8 @@ void main(){
     // --- morph factor (replaces Nimitz's prm1) ---
     float prm1 = clamp(u_morph + u_morphBass*u_bass + u_morphCentroid*u_centroid, 0.0, 1.0);
 
-    // --- monotonic forward time ---
-    float fwd = u_time * (u_speed + u_speedBass*u_bass);
+    // --- monotonic forward position (integrated in JS, can never go backward) ---
+    float fwd = u_path;
 
     // --- camera: straight along +Z by default, optional gentle sway ---
     vec3 ro = vec3(0.0, 0.0, fwd);

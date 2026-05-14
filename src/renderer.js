@@ -106,7 +106,7 @@ export class Renderer {
     }
   }
 
-  render(state, audio, time) {
+  render(state, audio, time, path) {
     const gl = this.gl;
 
     // ---- pass 1: scene to HDR FBO --------------------------------------
@@ -115,6 +115,7 @@ export class Renderer {
     gl.useProgram(this.scenePass);
     gl.uniform2f(uloc(gl, this.scenePass, 'u_res'), this.w, this.h);
     gl.uniform1f(uloc(gl, this.scenePass, 'u_time'), time);
+    gl.uniform1f(uloc(gl, this.scenePass, 'u_path'), path);
     // audio features
     gl.uniform1f(uloc(gl, this.scenePass, 'u_bass'),     audio.bass);
     gl.uniform1f(uloc(gl, this.scenePass, 'u_mid'),      audio.mid);

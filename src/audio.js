@@ -14,14 +14,17 @@ export class AudioEngine {
     this.time = new Uint8Array(0);
 
     // Smoothed / derived features. Range roughly 0..1, except centroid 0..1.
+    // `bassSmooth` is a slow (~1s) envelope used for camera-velocity modulation
+    // so per-beat transients don't make the tunnel jiggle.
     this.f = {
-      bass: 0, mid: 0, treble: 0,
+      bass: 0, bassSmooth: 0, mid: 0, treble: 0,
       centroid: 0.5, rms: 0, punch: 0,
       beat: 0,
     };
 
     // Internal envelopes.
     this._bassFast = 0; this._bassSlow = 0; this._lastBeat = -1; this._beatPhase = 0;
+    this._bassEnv = 0;  // slow envelope for path-velocity modulation
     this._punch = 0;
     this._manualGain = 1.0;
     this.audioBoost = 1.0;
@@ -143,14 +146,19 @@ export class AudioEngine {
     }
     if (this._beatPhase > 1) this._beatPhase = 1.0;
 
+    // Very slow lowpass for camera-velocity modulation. Cutoff ~0.5 Hz so we
+    // smooth across multiple beats; per-beat punch lives in `f.punch` separately.
+    this._bassEnv += (bass - this._bassEnv) * Math.min(1, dt * 0.8);
+
     const g = this.audioBoost;
-    this.f.bass     = Math.min(1, bass * g);
-    this.f.mid      = Math.min(1, mid * g);
-    this.f.treble   = Math.min(1, treble * g);
-    this.f.centroid = centroid;
-    this.f.rms      = Math.min(1, rms * 2.0 * g);
-    this.f.punch    = Math.min(1, this._punch);
-    this.f.beat     = this._beatPhase;
+    this.f.bass       = Math.min(1, bass * g);
+    this.f.bassSmooth = Math.min(1, this._bassEnv * g);
+    this.f.mid        = Math.min(1, mid * g);
+    this.f.treble     = Math.min(1, treble * g);
+    this.f.centroid   = centroid;
+    this.f.rms        = Math.min(1, rms * 2.0 * g);
+    this.f.punch      = Math.min(1, this._punch);
+    this.f.beat       = this._beatPhase;
     return this.f;
   }
 }
