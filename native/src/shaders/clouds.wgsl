@@ -1,25 +1,30 @@
-// Placeholder volumetric cloud raymarcher.
-// Grow into a Schneider-style pipeline: base 3D Worley+Perlin, detail Worley
-// erosion, 2D weather map (coverage/type/height), cone-sampled secondary
-// light march, Beer-Powder, temporal reprojection.
+// Port of Nimitz's "Protean Clouds" (Shadertoy 3l23Rh, CC BY-NC-SA 3.0)
+// to WGSL, with audio-reactive uniforms surfaced.
 
 struct Params {
     resolution: vec2<f32>,
     time: f32,
     _pad0: f32,
 
-    sun_dir: vec3<f32>,
-    coverage: f32,
+    bass: f32,
+    mid: f32,
+    treble: f32,
+    centroid: f32,
 
-    density: f32,
-    noise_scale: f32,
-    steps: f32,
-    light_steps: f32,
+    rms: f32,
+    punch: f32,
+    _pad1: f32,
+    _pad2: f32,
 
-    hg_g: f32,
-    absorption: f32,
-    wind_speed: f32,
-    cloud_height: f32,
+    speed: f32,
+    morph: f32,
+    density_mul: f32,
+    hue_shift: f32,
+
+    bass_to_speed: f32,
+    bass_to_morph: f32,
+    centroid_to_hue: f32,
+    rms_to_density: f32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -39,127 +44,177 @@ fn vs_fullscreen(@builtin(vertex_index) vid: u32) -> VsOut {
     return out;
 }
 
-// ---- noise --------------------------------------------------------------
-fn hash3(p: vec3<f32>) -> f32 {
-    var q = fract(p * vec3<f32>(0.1031, 0.1030, 0.0973));
-    q = q + dot(q, q.yzx + 33.33);
-    return fract((q.x + q.y) * q.z);
+fn rot(a: f32) -> mat2x2<f32> {
+    let c = cos(a);
+    let s = sin(a);
+    return mat2x2<f32>(c, s, -s, c);
 }
 
-fn value_noise(p: vec3<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    let n000 = hash3(i + vec3<f32>(0.0, 0.0, 0.0));
-    let n100 = hash3(i + vec3<f32>(1.0, 0.0, 0.0));
-    let n010 = hash3(i + vec3<f32>(0.0, 1.0, 0.0));
-    let n110 = hash3(i + vec3<f32>(1.0, 1.0, 0.0));
-    let n001 = hash3(i + vec3<f32>(0.0, 0.0, 1.0));
-    let n101 = hash3(i + vec3<f32>(1.0, 0.0, 1.0));
-    let n011 = hash3(i + vec3<f32>(0.0, 1.0, 1.0));
-    let n111 = hash3(i + vec3<f32>(1.0, 1.0, 1.0));
-    let nx00 = mix(n000, n100, u.x);
-    let nx10 = mix(n010, n110, u.x);
-    let nx01 = mix(n001, n101, u.x);
-    let nx11 = mix(n011, n111, u.x);
-    let nxy0 = mix(nx00, nx10, u.y);
-    let nxy1 = mix(nx01, nx11, u.y);
-    return mix(nxy0, nxy1, u.z);
+// Nimitz's mat3 m3, pre-multiplied by 1.93. Stored as columns to match GLSL.
+fn m3() -> mat3x3<f32> {
+    return mat3x3<f32>(
+        vec3<f32>( 0.6434234,  1.0814562, -1.3860681),
+        vec3<f32>(-1.6962191,  0.6301643, -0.2957339),
+        vec3<f32>( 0.2926266,  1.3432028,  1.1838427),
+    );
 }
 
-fn fbm(p: vec3<f32>) -> f32 {
-    var q = p;
-    var amp = 0.5;
-    var sum = 0.0;
+fn mag2(p: vec2<f32>) -> f32 { return dot(p, p); }
+
+fn linstep(mn: f32, mx: f32, x: f32) -> f32 {
+    return clamp((x - mn) / (mx - mn), 0.0, 1.0);
+}
+
+fn disp(t: f32) -> vec2<f32> {
+    return vec2<f32>(sin(t * 0.22), cos(t * 0.175)) * 2.0;
+}
+
+// HSV-ish hue rotation on linear RGB.
+fn hue_rotate(c: vec3<f32>, a: f32) -> vec3<f32> {
+    let k = vec3<f32>(0.57735026919);
+    let co = cos(a);
+    let si = sin(a);
+    return c * co + cross(k, c) * si + k * dot(k, c) * (1.0 - co);
+}
+
+fn map_fn(p_in: vec3<f32>, prm1: f32, bs_mo: vec2<f32>, itime: f32) -> vec2<f32> {
+    var p = p_in;
+    let p2_xy = p.xy - disp(p.z).xy;
+    let p2 = vec3<f32>(p2_xy, p.z);
+    let r = rot(sin(p.z + itime) * (0.1 + prm1 * 0.05) + itime * 0.09);
+    // GLSL: p.xy *= rot(...)  → v * M
+    let xy = p.xy * r;
+    p = vec3<f32>(xy, p.z);
+    let cl = mag2(p2.xy);
+    var d = 0.0;
+    p = p * 0.61;
+    var z = 1.0;
+    var trk = 1.0;
+    let dsp_amp = 0.1 + prm1 * 0.2;
     for (var i = 0; i < 5; i = i + 1) {
-        sum = sum + amp * value_noise(q);
-        q = q * 2.03;
-        amp = amp * 0.5;
+        p = p + sin(p.zxy * 0.75 * trk + itime * trk * 0.8) * dsp_amp;
+        d = d - abs(dot(cos(p), sin(p.yzx)) * z);
+        z = z * 0.57;
+        trk = trk * 1.4;
+        // GLSL: p = p * m3 → v * M
+        p = p * m3();
     }
-    return sum;
+    d = abs(d + prm1 * 3.0) + prm1 * 0.3 - 2.5 + bs_mo.y;
+    return vec2<f32>(d + cl * 0.2 + 0.25, cl);
 }
 
-// ---- cloud field --------------------------------------------------------
-const CLOUD_BASE: f32 = 1.5;
+fn render_clouds(
+    ro: vec3<f32>,
+    rd: vec3<f32>,
+    prm1: f32,
+    bs_mo: vec2<f32>,
+    itime: f32,
+    density_boost: f32,
+) -> vec4<f32> {
+    var rez = vec4<f32>(0.0);
+    var t = 1.5;
+    var fog_t = 0.0;
+    for (var i = 0; i < 130; i = i + 1) {
+        if (rez.a > 0.99) { break; }
+        let pos = ro + t * rd;
+        let mpv = map_fn(pos, prm1, bs_mo, itime);
+        let den = clamp(mpv.x - 0.3, 0.0, 1.0) * 1.12 * density_boost;
+        let dn = clamp(mpv.x + 2.0, 0.0, 3.0);
 
-fn cloud_density(pos: vec3<f32>) -> f32 {
-    let thickness = P.cloud_height;
-    let top = CLOUD_BASE + thickness;
-    if (pos.y < CLOUD_BASE || pos.y > top) {
-        return 0.0;
+        var col = vec4<f32>(0.0);
+        if (mpv.x > 0.6) {
+            let base = sin(vec3<f32>(5.0, 0.4, 0.2)
+                + mpv.y * 0.1
+                + sin(pos.z * 0.4) * 0.5
+                + 1.8) * 0.5 + 0.5;
+            col = vec4<f32>(base, 0.08);
+            col = col * (den * den * den);
+            col = vec4<f32>(col.rgb * (linstep(4.0, -2.5, mpv.x) * 2.3), col.a);
+
+            var dif = clamp((den - map_fn(pos + 0.8, prm1, bs_mo, itime).x) / 9.0, 0.001, 1.0);
+            dif = dif + clamp((den - map_fn(pos + 0.35, prm1, bs_mo, itime).x) / 2.5, 0.001, 1.0);
+            let shade = vec3<f32>(0.005, 0.045, 0.075)
+                + 1.5 * vec3<f32>(0.033, 0.07, 0.03) * dif;
+            col = vec4<f32>(col.xyz * den * shade, col.a);
+        }
+
+        let fog_c = exp(t * 0.2 - 2.2);
+        col = col + vec4<f32>(0.06, 0.11, 0.11, 0.1) * clamp(fog_c - fog_t, 0.0, 1.0);
+        fog_t = fog_c;
+        rez = rez + col * (1.0 - rez.a);
+        t = t + clamp(0.5 - dn * dn * 0.05, 0.09, 0.3);
     }
-    let wind = vec3<f32>(P.time * P.wind_speed, 0.0, P.time * P.wind_speed * 0.3);
-    let q = (pos + wind) * P.noise_scale;
-    let n = fbm(q);
-    let h = (pos.y - CLOUD_BASE) / thickness;
-    let shape = smoothstep(0.0, 0.2, h) * smoothstep(1.0, 0.7, h);
-    let d = max(n - (1.0 - P.coverage), 0.0) * shape * P.density;
-    return d;
+    return clamp(rez, vec4<f32>(0.0), vec4<f32>(1.0));
 }
 
-fn hg_phase(cos_theta: f32, g: f32) -> f32 {
-    let g2 = g * g;
-    let denom = 1.0 + g2 - 2.0 * g * cos_theta;
-    return (1.0 - g2) / (12.566370614 * pow(max(denom, 1e-4), 1.5));
+fn getsat(c: vec3<f32>) -> f32 {
+    let mi = min(min(c.x, c.y), c.z);
+    let ma = max(max(c.x, c.y), c.z);
+    return (ma - mi) / (ma + 1e-7);
 }
 
-fn light_march(pos: vec3<f32>) -> f32 {
-    let n = i32(P.light_steps);
-    var step_len = 0.15;
-    var t = step_len;
-    var dens = 0.0;
-    for (var i = 0; i < n; i = i + 1) {
-        let p = pos + P.sun_dir * t;
-        dens = dens + cloud_density(p) * step_len;
-        t = t + step_len;
-        step_len = step_len * 1.3;
-    }
-    return exp(-dens * P.absorption * 8.0);
+fn i_lerp(a: vec3<f32>, b: vec3<f32>, x: f32) -> vec3<f32> {
+    var ic = mix(a, b, x) + vec3<f32>(1e-6, 0.0, 0.0);
+    let sd = abs(getsat(ic) - mix(getsat(a), getsat(b), x));
+    let dir = normalize(vec3<f32>(
+        2.0 * ic.x - ic.y - ic.z,
+        2.0 * ic.y - ic.x - ic.z,
+        2.0 * ic.z - ic.y - ic.x,
+    ));
+    let lgt = dot(vec3<f32>(1.0), ic);
+    let ff = dot(dir, normalize(ic));
+    ic = ic + 1.5 * dir * sd * ff * lgt;
+    return clamp(ic, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 @fragment
 fn fs_clouds(in: VsOut) -> @location(0) vec4<f32> {
-    let aspect = P.resolution.x / max(P.resolution.y, 1.0);
-    let ndc = (in.uv * 2.0 - 1.0) * vec2<f32>(aspect, 1.0);
+    let frag_coord = in.uv * P.resolution;
+    let q = in.uv;
+    let p = (frag_coord - 0.5 * P.resolution) / P.resolution.y;
+    let bs_mo = vec2<f32>(0.0);
 
-    let cam_pos = vec3<f32>(0.0, 1.0, 0.0);
-    let ray_dir = normalize(vec3<f32>(ndc.x, ndc.y * 0.6 + 0.2, 1.0));
+    let itime = P.time;
+    let speed = P.speed + P.bass * P.bass_to_speed;
+    let time = itime * speed;
 
-    let sky_top = vec3<f32>(0.40, 0.58, 0.85);
-    let sky_horizon = vec3<f32>(0.85, 0.88, 0.95);
-    let sun = max(dot(ray_dir, P.sun_dir), 0.0);
-    var sky = mix(sky_horizon, sky_top, clamp(ray_dir.y, 0.0, 1.0));
-    sky = sky + vec3<f32>(1.0, 0.95, 0.85) * pow(sun, 32.0) * 0.7;
+    var ro = vec3<f32>(0.0, 0.0, time);
+    ro = ro + vec3<f32>(sin(itime) * 0.5, 0.0, 0.0);
 
-    let n = i32(P.steps);
-    let t_max = 30.0;
-    let dt = t_max / f32(n);
+    let dsp_amp = 0.85;
+    let d_xy = disp(ro.z) * dsp_amp;
+    ro = vec3<f32>(ro.xy + d_xy, ro.z);
 
-    var T = 1.0;
-    var col = vec3<f32>(0.0);
-    let phase = hg_phase(dot(ray_dir, P.sun_dir), P.hg_g);
+    let tgt_dst = 3.5;
+    let tgt_disp = disp(time + tgt_dst) * dsp_amp;
+    var target = normalize(ro - vec3<f32>(tgt_disp, time + tgt_dst));
+    ro.x = ro.x - bs_mo.x * 2.0;
 
-    let jitter = fract(sin(dot(in.uv, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+    var rightdir = normalize(cross(target, vec3<f32>(0.0, 1.0, 0.0)));
+    let updir = normalize(cross(rightdir, target));
+    rightdir = normalize(cross(updir, target));
+    var rd = normalize((p.x * rightdir + p.y * updir) - target);
 
-    for (var i = 0; i < n; i = i + 1) {
-        let t = (f32(i) + jitter) * dt;
-        let p = cam_pos + ray_dir * t;
-        if (p.y > CLOUD_BASE + P.cloud_height + 0.01 && ray_dir.y > 0.0) {
-            break;
-        }
-        let d = cloud_density(p);
-        if (d > 0.001) {
-            let lt = light_march(p);
-            let scatter = lt * phase * d * dt;
-            let absorbed = exp(-d * dt * (P.absorption + 1.0));
-            col = col + T * scatter * vec3<f32>(1.0, 0.95, 0.9);
-            T = T * absorbed;
-            if (T < 0.02) {
-                break;
-            }
-        }
-    }
+    let r2 = rot(-disp(time + 3.5).x * 0.2 + bs_mo.x);
+    let rdxy = rd.xy * r2;
+    rd = vec3<f32>(rdxy, rd.z);
 
-    let out_col = sky * T + col;
-    return vec4<f32>(pow(out_col, vec3<f32>(1.0 / 2.2)), 1.0);
+    let base_prm = smoothstep(-0.4, 0.4, sin(itime * 0.3));
+    let prm1 = clamp(base_prm + P.morph + P.bass * P.bass_to_morph, 0.0, 1.6);
+
+    let density_boost = P.density_mul + P.rms * P.rms_to_density + P.punch * 0.4;
+
+    let scn = render_clouds(ro, rd, prm1, bs_mo, itime, density_boost);
+
+    var col = scn.rgb;
+    col = i_lerp(col.bgr, col.rgb, clamp(1.0 - prm1, 0.05, 1.0));
+    col = pow(col, vec3<f32>(0.55, 0.65, 0.6)) * vec3<f32>(1.0, 0.97, 0.9);
+
+    let hue = P.hue_shift + (P.centroid - 0.5) * P.centroid_to_hue;
+    col = hue_rotate(col, hue);
+
+    // Vignette.
+    col = col * (pow(16.0 * q.x * q.y * (1.0 - q.x) * (1.0 - q.y), 0.12) * 0.7 + 0.3);
+
+    return vec4<f32>(col, 1.0);
 }
