@@ -219,7 +219,12 @@ fn fs_clouds(in: VsOut) -> @location(0) vec4<f32> {
     let itime = P.time;
     let prm1_base = smoothstep(-0.4, 0.4, sin(itime * 0.3));
     let prm1 = clamp(prm1_base + P.morph + P.bass * P.bass_to_morph, 0.0, 1.6);
-    let density_boost = P.density_mul + P.rms * P.rms_to_density + P.punch * 0.4;
+    // Density boost is hard-capped so transient hits / sustained bass can't
+    // drown the camera in fog. Crank density_mul if you really want soup.
+    let density_boost = clamp(
+        P.density_mul + P.rms * P.rms_to_density + P.punch * 0.25,
+        0.5, 1.45,
+    );
 
     let ro = P.cam_pos;
     let rd = normalize(p.x * P.cam_right + p.y * P.cam_up + P.cam_fwd);

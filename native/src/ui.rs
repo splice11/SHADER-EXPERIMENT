@@ -1,24 +1,39 @@
-use crate::app::{Camera, Director, DirectorFeel, Lightning};
+use crate::app::{Camera, Director, DirectorFeel, Lightning, Scene};
 use crate::palettes::PALETTES;
 use crate::params::{CloudParams, PostParams};
 
-pub fn build(
-    ctx: &egui::Context,
-    p: &mut CloudParams,
-    post: &mut PostParams,
-    lightning: &mut Lightning,
-    director: &mut Director,
-    camera: &mut Camera,
-    palette_index: &mut usize,
-    audio_source: &str,
-) {
+pub struct UiCtx<'a> {
+    pub p: &'a mut CloudParams,
+    pub post: &'a mut PostParams,
+    pub lightning: &'a mut Lightning,
+    pub director: &'a mut Director,
+    pub camera: &'a mut Camera,
+    pub palette_index: &'a mut usize,
+    pub use_palette_accent: &'a mut bool,
+    pub scene: &'a mut Scene,
+    pub audio_source: &'a str,
+}
+
+pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
+    let UiCtx {
+        p, post, lightning, director, camera,
+        palette_index, use_palette_accent, scene, audio_source,
+    } = c;
     egui::SidePanel::right("controls")
         .default_width(330.0)
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading("protean clouds");
-                ui.small("F11 fullscreen · H hide ui · L manual lightning · Esc exit");
+                ui.heading("shader-experiment");
+                ui.small("F11 fullscreen · H hide ui · C cycle scene · L lightning · Esc exit");
                 ui.separator();
+
+                egui::CollapsingHeader::new("scene").default_open(true).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("show");
+                        ui.selectable_value(scene, Scene::Clouds, "Clouds");
+                        ui.selectable_value(scene, Scene::Cube, "Cube");
+                    });
+                });
 
                 egui::CollapsingHeader::new("audio").default_open(true).show(ui, |ui| {
                     ui.label(format!("source: {audio_source}"));
@@ -41,6 +56,14 @@ pub fn build(
                     bar(ui, "swell", director.swell);
                     bar(ui, "drop", director.drop);
                     bar(ui, "lull", director.lull);
+                    let bpm = director.bpm();
+                    ui.label(format!(
+                        "section: {:?}   bpm: {}",
+                        director.section,
+                        if bpm > 30.0 { format!("{bpm:.0}") } else { "—".to_string() }
+                    ));
+                    ui.checkbox(&mut director.auto_palette,
+                        "auto-rotate palettes on section changes");
                 });
 
                 egui::CollapsingHeader::new("camera").default_open(true).show(ui, |ui| {
@@ -62,6 +85,8 @@ pub fn build(
                                 ui.selectable_value(palette_index, i, pal.name);
                             }
                         });
+                    ui.checkbox(use_palette_accent,
+                        "palette accent → lightning colour");
                     ui.label("palette amount");
                     ui.add(egui::Slider::new(&mut p.palette_amount, 0.0..=1.0));
                     ui.label("centroid → palette offset");
@@ -126,7 +151,9 @@ pub fn build(
                     ui.label("morph (prm1)");
                     ui.add(egui::Slider::new(&mut p.morph, -0.5..=1.5));
                     ui.label("density mul");
-                    ui.add(egui::Slider::new(&mut p.density_mul, 0.2..=3.0));
+                    ui.add(egui::Slider::new(&mut p.density_mul, 0.2..=2.0));
+                    ui.small("density is hard-capped at 1.45 inside the shader to \
+                              prevent the camera being smothered in fog.");
                 });
 
                 egui::CollapsingHeader::new("audio routing").default_open(false).show(ui, |ui| {
@@ -161,7 +188,7 @@ pub fn hint_overlay(ctx: &egui::Context) {
             frame.show(ui, |ui| {
                 ui.colored_label(
                     egui::Color32::from_white_alpha(200),
-                    "H show ui · F11 fullscreen · L lightning · Esc exit",
+                    "H show ui · F11 fullscreen · C scene · L lightning · Esc exit",
                 );
             });
         });

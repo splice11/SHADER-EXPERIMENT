@@ -2,6 +2,8 @@
 pub struct Palette {
     pub name: &'static str,
     pub stops: [[f32; 3]; 5],
+    /// Contrasting accent used for lightning by default.
+    pub accent: [f32; 3],
 }
 
 pub const PALETTES: &[Palette] = &[
@@ -14,6 +16,7 @@ pub const PALETTES: &[Palette] = &[
             [0.90, 0.78, 0.62],
             [1.00, 0.97, 0.88],
         ],
+        accent: [0.78, 0.88, 1.20],
     },
     Palette {
         name: "Sunset",
@@ -24,6 +27,7 @@ pub const PALETTES: &[Palette] = &[
             [1.00, 0.75, 0.30],
             [1.00, 0.97, 0.85],
         ],
+        accent: [0.20, 0.95, 1.10], // teal/cyan contrast
     },
     Palette {
         name: "Cyberpunk",
@@ -34,6 +38,7 @@ pub const PALETTES: &[Palette] = &[
             [1.00, 0.30, 0.80],
             [1.00, 0.85, 0.95],
         ],
+        accent: [0.85, 1.20, 0.30], // acid green/yellow
     },
     Palette {
         name: "Aurora",
@@ -44,6 +49,7 @@ pub const PALETTES: &[Palette] = &[
             [0.55, 1.00, 0.60],
             [0.92, 1.00, 0.92],
         ],
+        accent: [1.20, 0.35, 0.95], // hot magenta
     },
     Palette {
         name: "Ember",
@@ -54,6 +60,7 @@ pub const PALETTES: &[Palette] = &[
             [1.00, 0.55, 0.10],
             [1.00, 0.95, 0.65],
         ],
+        accent: [0.30, 0.95, 1.20], // ice blue
     },
     Palette {
         name: "Mono",
@@ -64,6 +71,7 @@ pub const PALETTES: &[Palette] = &[
             [0.75, 0.75, 0.78],
             [1.00, 1.00, 1.00],
         ],
+        accent: [1.00, 1.00, 1.00],
     },
     Palette {
         name: "Ice",
@@ -74,5 +82,6 @@ pub const PALETTES: &[Palette] = &[
             [0.70, 0.90, 1.00],
             [0.97, 0.99, 1.00],
         ],
+        accent: [1.20, 0.55, 0.10], // warm orange
     },
 ];
