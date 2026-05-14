@@ -1,51 +1,56 @@
 use crate::params::CloudParams;
 
-pub fn build(ctx: &egui::Context, p: &mut CloudParams) {
+pub fn build(ctx: &egui::Context, p: &mut CloudParams, audio_source: &str) {
     egui::SidePanel::right("controls")
-        .default_width(300.0)
+        .default_width(320.0)
         .show(ctx, |ui| {
-            ui.heading("clouds");
+            ui.heading("protean clouds");
             ui.separator();
 
-            ui.label("Coverage");
-            ui.add(egui::Slider::new(&mut p.coverage, 0.0..=1.0));
-
-            ui.label("Density");
-            ui.add(egui::Slider::new(&mut p.density, 0.0..=4.0));
-
-            ui.label("Noise scale");
-            ui.add(egui::Slider::new(&mut p.noise_scale, 0.1..=3.0));
-
-            ui.label("Primary steps");
-            ui.add(egui::Slider::new(&mut p.steps, 16.0..=256.0).integer());
-
-            ui.label("Light march steps");
-            ui.add(egui::Slider::new(&mut p.light_steps, 1.0..=16.0).integer());
-
-            ui.label("Henyey–Greenstein g");
-            ui.add(egui::Slider::new(&mut p.hg_g, -0.99..=0.99));
-
-            ui.label("Absorption");
-            ui.add(egui::Slider::new(&mut p.absorption, 0.0..=0.5));
-
-            ui.label("Wind speed");
-            ui.add(egui::Slider::new(&mut p.wind_speed, 0.0..=2.0));
-
-            ui.label("Cloud layer thickness");
-            ui.add(egui::Slider::new(&mut p.cloud_height, 0.2..=4.0));
+            egui::CollapsingHeader::new("audio").default_open(true).show(ui, |ui| {
+                ui.label(format!("source: {audio_source}"));
+                bar(ui, "bass", p.bass);
+                bar(ui, "mid", p.mid);
+                bar(ui, "treble", p.treble);
+                bar(ui, "centroid", p.centroid);
+                bar(ui, "rms", p.rms);
+                bar(ui, "punch", p.punch);
+            });
 
             ui.separator();
-            ui.label("Sun direction");
-            let mut sd = p.sun_dir;
-            ui.add(egui::Slider::new(&mut sd[0], -1.0..=1.0).text("x"));
-            ui.add(egui::Slider::new(&mut sd[1], -1.0..=1.0).text("y"));
-            ui.add(egui::Slider::new(&mut sd[2], -1.0..=1.0).text("z"));
-            let l = (sd[0] * sd[0] + sd[1] * sd[1] + sd[2] * sd[2])
-                .sqrt()
-                .max(1e-6);
-            p.sun_dir = [sd[0] / l, sd[1] / l, sd[2] / l];
+            ui.label("base speed");
+            ui.add(egui::Slider::new(&mut p.speed, 0.0..=12.0));
+            ui.label("morph (prm1)");
+            ui.add(egui::Slider::new(&mut p.morph, -0.5..=1.5));
+            ui.label("density mul");
+            ui.add(egui::Slider::new(&mut p.density_mul, 0.2..=3.0));
+            ui.label("hue shift");
+            ui.add(egui::Slider::new(&mut p.hue_shift, -3.14..=3.14));
 
             ui.separator();
-            ui.small("Placeholder marcher. Replace with Schneider-style base+detail noise, weather map, cone-sampled light march.");
+            ui.label("audio routing");
+            ui.label("bass → speed");
+            ui.add(egui::Slider::new(&mut p.bass_to_speed, 0.0..=10.0));
+            ui.label("bass → morph");
+            ui.add(egui::Slider::new(&mut p.bass_to_morph, 0.0..=2.0));
+            ui.label("centroid → hue");
+            ui.add(egui::Slider::new(&mut p.centroid_to_hue, -3.14..=3.14));
+            ui.label("rms → density");
+            ui.add(egui::Slider::new(&mut p.rms_to_density, 0.0..=2.0));
+
+            ui.separator();
+            ui.small(
+                "Audio capture uses your default ALSA/PipeWire input. \
+                 To visualize system audio, set the input in pavucontrol \
+                 to a 'Monitor of …' source for your output sink.",
+            );
         });
+}
+
+fn bar(ui: &mut egui::Ui, label: &str, value: f32) {
+    ui.horizontal(|ui| {
+        ui.label(format!("{label:<9}"));
+        ui.add(egui::ProgressBar::new(value.clamp(0.0, 1.0)).desired_width(180.0));
+        ui.label(format!("{value:.2}"));
+    });
 }

@@ -1,4 +1,4 @@
-use crate::{params::CloudParams, renderer::Renderer, ui};
+use crate::{audio::Audio, params::CloudParams, renderer::Renderer, ui};
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
@@ -13,6 +13,7 @@ pub struct AppState {
     pub egui_renderer: egui_wgpu::Renderer,
     pub params: CloudParams,
     pub start: Instant,
+    pub audio: Audio,
 }
 
 #[derive(Default)]
@@ -45,6 +46,8 @@ impl ApplicationHandler for App {
         let egui_renderer =
             egui_wgpu::Renderer::new(&renderer.device, renderer.config.format, None, 1, false);
 
+        let audio = Audio::start();
+
         self.state = Some(AppState {
             renderer,
             egui_ctx,
@@ -52,6 +55,7 @@ impl ApplicationHandler for App {
             egui_renderer,
             params: CloudParams::default(),
             start: Instant::now(),
+            audio,
         });
     }
 
@@ -91,9 +95,21 @@ fn render_frame(s: &mut AppState) {
     s.params.resolution = [size.width as f32, size.height as f32];
     s.params.time = s.start.elapsed().as_secs_f32();
 
+    let feat = s.audio.read();
+    s.params.bass = feat.bass;
+    s.params.mid = feat.mid;
+    s.params.treble = feat.treble;
+    s.params.centroid = feat.centroid;
+    s.params.rms = feat.rms;
+    s.params.punch = feat.punch;
+
     // UI pass
     let raw = s.egui_state.take_egui_input(&s.renderer.window);
-    let full = s.egui_ctx.clone().run(raw, |ctx| ui::build(ctx, &mut s.params));
+    let audio_src = s.audio.source_name.clone();
+    let full = s
+        .egui_ctx
+        .clone()
+        .run(raw, |ctx| ui::build(ctx, &mut s.params, &audio_src));
     s.egui_state
         .handle_platform_output(&s.renderer.window, full.platform_output);
 
