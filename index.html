@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cloud Tunnel — Shader Lab</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; padding: 0; height: 100%; background: #000; color: #ddd;
+               font-family: ui-sans-serif, system-ui, sans-serif; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+  #ui { position: fixed; top: 8px; right: 8px; width: 320px; max-height: calc(100vh - 16px);
+        overflow-y: auto; z-index: 10; }
+  #hud { position: fixed; left: 10px; bottom: 8px; font: 12px/1.4 ui-monospace, monospace;
+         color: #9aa; pointer-events: none; text-shadow: 0 1px 2px #000; z-index: 5; }
+  #drop { position: fixed; inset: 0; pointer-events: none; z-index: 20;
+          display: none; align-items: center; justify-content: center;
+          background: rgba(0,0,0,.45); border: 4px dashed #6cf; box-sizing: border-box;
+          font-size: 20px; color: #cef; }
+  #drop.active { display: flex; }
+  #start { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+           background: #000; z-index: 30; color: #ccc; cursor: pointer; flex-direction: column; gap: 10px; }
+  #start.hidden { display: none; }
+  #start .big { font-size: 22px; }
+  #start .small { font-size: 12px; color: #888; max-width: 480px; text-align: center; }
+  a { color: #6cf; }
+</style>
+</head>
+<body>
+  <canvas id="gl"></canvas>
+  <div id="hud">init…</div>
+  <div id="ui"></div>
+  <div id="drop">drop an audio file to play</div>
+  <div id="start">
+    <div class="big">click to start</div>
+    <div class="small">a browser policy thing — audio context needs a user gesture.
+      then drop an mp3/wav anywhere, or pick a source in the panel.</div>
+  </div>
+  <script type="importmap">
+  { "imports": {
+      "tweakpane": "https://cdn.jsdelivr.net/npm/tweakpane@4.0.5/+esm"
+  } }
+  </script>
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
