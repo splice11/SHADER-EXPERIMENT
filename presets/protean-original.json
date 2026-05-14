@@ -1,0 +1,26 @@
+{
+  "_meta": { "app": "cloud-tunnel-shader", "version": 2, "name": "protean-original",
+              "description": "Matches Nimitz's Protean Clouds (Shadertoy 3l23Rh) as closely as possible. All original constants restored; bloom/CA/grain off. Camera retains the original lateral sway and per-frame horizontal sine, so it will wander - set swayAmp=0 + extraSwayX=0 to get a straight tunnel." },
+  "params": {
+    "speed": 3.0, "speedBass": 0.0, "fov": 50.0,
+    "swayAmp": 1.70, "swayFreq": 1.0, "extraSwayX": 0.50,
+    "rollAmp": 0.10, "rollFreq": 0.09,
+    "morph": 0.50, "morphBass": 0.0, "morphCentroid": 0.0,
+    "density": 1.12, "densityBass": 0.0,
+    "noiseScale": 0.61, "dispAmp": 0.10, "octaveScale": 0.57, "octaves": 5,
+    "steps": 130, "stepSize": 0.5, "near": 1.5, "far": 60.0,
+    "colorA": [0.005, 0.045, 0.075],
+    "colorB": [0.0495, 0.105, 0.045],
+    "colorAccent": [1.00, 1.00, 1.00],
+    "paletteBaseR": 6.80, "paletteBaseG": 2.20, "paletteBaseB": 2.00,
+    "paletteAmt": 1.00,
+    "warmTint": [1.00, 0.97, 0.90],
+    "gammaR": 0.55, "gammaG": 0.65, "gammaB": 0.60,
+    "hueShift": 0.0, "hueCentroid": 0.0,
+    "fogColor": [0.06, 0.11, 0.11], "fogDensity": 0.20,
+    "lightDir": 0.0, "lightStrength": 1.0, "hg": 0.0,
+    "exposure": 1.00, "bloomAmt": 0.00, "bloomThreshold": 1.00,
+    "ca": 0.0, "vignette": 0.60, "grain": 0.0,
+    "gamma": 2.2, "contrast": 1.00, "saturation": 1.00
+  }
+}
