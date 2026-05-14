@@ -1,6 +1,6 @@
 {
-  "_meta": { "app": "cloud-tunnel-shader", "version": 1, "name": "deep-space",
-              "description": "slow drift through dark navy/violet clouds, soft bloom" },
+  "_meta": { "app": "cloud-tunnel-shader", "version": 2, "name": "deep-space",
+              "description": "slow drift, cool blues and violets, palette muted toward uniform tone" },
   "params": {
     "speed": 1.0, "speedBass": 0.20, "fov": 70.0,
     "swayAmp": 0.0, "swayFreq": 1.0, "extraSwayX": 0.0,
@@ -9,15 +9,18 @@
     "density": 1.00, "densityBass": 0.20,
     "noiseScale": 0.42, "dispAmp": 0.08, "octaveScale": 0.60, "octaves": 6,
     "steps": 130, "stepSize": 0.5, "near": 1.5, "far": 80.0,
-    "colorA": [0.002, 0.003, 0.015],
-    "colorB": [0.35, 0.40, 0.85],
-    "colorAccent": [0.55, 0.30, 0.90],
-    "accentAmt": 0.35,
+    "colorA": [0.003, 0.015, 0.035],
+    "colorB": [0.020, 0.040, 0.090],
+    "colorAccent": [0.70, 0.85, 1.10],
+    "paletteBaseR": 4.5, "paletteBaseG": 1.2, "paletteBaseB": 2.5,
+    "paletteAmt": 0.50,
+    "warmTint": [0.80, 0.95, 1.15],
+    "gammaR": 0.70, "gammaG": 0.65, "gammaB": 0.50,
     "hueShift": 0.0, "hueCentroid": 0.5,
     "fogColor": [0.02, 0.015, 0.05], "fogDensity": 0.32,
-    "lightDir": 2.4, "lightStrength": 0.7, "hg": 0.40,
+    "lightDir": 2.4, "lightStrength": 0.9, "hg": 0.30,
     "exposure": 1.10, "bloomAmt": 0.90, "bloomThreshold": 0.70,
     "ca": 0.006, "vignette": 0.70, "grain": 0.03,
-    "gamma": 2.3, "contrast": 1.10, "saturation": 1.00
+    "gamma": 2.2, "contrast": 1.10, "saturation": 1.00
   }
 }
