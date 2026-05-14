@@ -187,13 +187,13 @@ fn fs_clouds(in: VsOut) -> @location(0) vec4<f32> {
 
     let tgt_dst = 3.5;
     let tgt_disp = disp(time + tgt_dst) * dsp_amp;
-    var target = normalize(ro - vec3<f32>(tgt_disp, time + tgt_dst));
+    var tgt = normalize(ro - vec3<f32>(tgt_disp, time + tgt_dst));
     ro.x = ro.x - bs_mo.x * 2.0;
 
-    var rightdir = normalize(cross(target, vec3<f32>(0.0, 1.0, 0.0)));
-    let updir = normalize(cross(rightdir, target));
-    rightdir = normalize(cross(updir, target));
-    var rd = normalize((p.x * rightdir + p.y * updir) - target);
+    var rightdir = normalize(cross(tgt, vec3<f32>(0.0, 1.0, 0.0)));
+    let updir = normalize(cross(rightdir, tgt));
+    rightdir = normalize(cross(updir, tgt));
+    var rd = normalize((p.x * rightdir + p.y * updir) - tgt);
 
     let r2 = rot(-disp(time + 3.5).x * 0.2 + bs_mo.x);
     let rdxy = rd.xy * r2;
