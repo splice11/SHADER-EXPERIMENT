@@ -1,23 +1,225 @@
 use crate::{
-    audio::Audio,
+    audio::{Audio, Features as AudioFeatures},
     palettes::PALETTES,
-    params::{CloudParams, PostParams},
+    params::{CloudParams, PostParams, BOLT_PATH_LEN},
     renderer::Renderer,
     ui,
 };
 use std::sync::Arc;
 use std::time::Instant;
 use winit::application::ApplicationHandler;
-use winit::event::WindowEvent;
+use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
-use winit::window::{Window, WindowId};
+use winit::keyboard::{KeyCode, PhysicalKey};
+use winit::window::{Fullscreen, Window, WindowId};
+
+// ---------- math helpers ----------
+
+fn v_sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+fn v_add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+fn v_scale(a: [f32; 3], s: f32) -> [f32; 3] {
+    [a[0] * s, a[1] * s, a[2] * s]
+}
+fn v_cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
+}
+fn v_norm(v: [f32; 3]) -> [f32; 3] {
+    let m = (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]).sqrt().max(1e-6);
+    [v[0]/m, v[1]/m, v[2]/m]
+}
+fn v_lerp(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [a[0] + (b[0]-a[0])*t, a[1] + (b[1]-a[1])*t, a[2] + (b[2]-a[2])*t]
+}
+
+fn disp_xy(t: f32) -> [f32; 2] {
+    [(t * 0.22).sin() * 2.0, (t * 0.175).cos() * 2.0]
+}
+
+fn hash_u32(seed: u32, salt: u32) -> f32 {
+    let mut x = seed.wrapping_mul(0x9E3779B1).wrapping_add(salt.wrapping_mul(0x85EBCA77));
+    x ^= x >> 16; x = x.wrapping_mul(0x7FEB352D);
+    x ^= x >> 15; x = x.wrapping_mul(0x846CA68B);
+    x ^= x >> 16;
+    (x as f32 / u32::MAX as f32).clamp(0.0, 1.0)
+}
+
+// ---------- camera ----------
+
+pub struct Camera {
+    pub pos: [f32; 3],
+    pub lookat: [f32; 3],
+    pub z: f32, // integrated forward distance
+    pub sway_amp: f32,
+    pub follow_secs: f32,
+    pub kick_offset: [f32; 3],
+    pub kick_vel: [f32; 3],
+    pub roll: f32, // radians, around forward
+}
+
+impl Default for Camera {
+    fn default() -> Self {
+        Self {
+            pos: [0.0, 0.0, 0.0],
+            lookat: [0.0, 0.0, 3.5],
+            z: 0.0,
+            sway_amp: 0.55,
+            follow_secs: 0.32,
+            kick_offset: [0.0; 3],
+            kick_vel: [0.0; 3],
+            roll: 0.0,
+        }
+    }
+}
+
+impl Camera {
+    fn integrate(&mut self, speed: f32, dt: f32) {
+        self.z += speed * dt;
+    }
+
+    fn target_pos(&self) -> [f32; 3] {
+        let d = disp_xy(self.z);
+        [d[0] * self.sway_amp, d[1] * self.sway_amp, self.z]
+    }
+    fn target_look(&self) -> [f32; 3] {
+        let ahead = self.z + 3.5;
+        let d = disp_xy(ahead);
+        [d[0] * self.sway_amp, d[1] * self.sway_amp, ahead]
+    }
+
+    fn smooth_follow(&mut self, dt: f32) {
+        let alpha = 1.0 - (-dt / self.follow_secs.max(1e-3)).exp();
+        self.pos = v_lerp(self.pos, self.target_pos(), alpha);
+        self.lookat = v_lerp(self.lookat, self.target_look(), alpha);
+    }
+
+    fn apply_kick_spring(&mut self, dt: f32) {
+        // critically-damped spring back to zero offset
+        let k = 60.0;
+        let c = 14.0;
+        for i in 0..3 {
+            let accel = -self.kick_offset[i] * k - self.kick_vel[i] * c;
+            self.kick_vel[i] += accel * dt;
+            self.kick_offset[i] += self.kick_vel[i] * dt;
+        }
+    }
+
+    fn add_kick(&mut self, v: [f32; 3]) {
+        for i in 0..3 {
+            self.kick_vel[i] += v[i];
+        }
+    }
+
+    /// Compute right/up/fwd basis with roll. Returns (right, up, fwd).
+    fn basis(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+        let pos = v_add(self.pos, self.kick_offset);
+        let fwd = v_norm(v_sub(self.lookat, pos));
+        let world_up = [0.0, 1.0, 0.0];
+        let right0 = v_norm(v_cross(fwd, world_up));
+        let up0 = v_norm(v_cross(right0, fwd));
+        // Apply roll around fwd: rotate (right, up) by self.roll.
+        let cr = self.roll.cos();
+        let sr = self.roll.sin();
+        let right = v_add(v_scale(right0, cr), v_scale(up0, sr));
+        let up = v_add(v_scale(up0, cr), v_scale(right0, -sr));
+        (right, up, fwd)
+    }
+
+    fn world_pos(&self) -> [f32; 3] {
+        v_add(self.pos, self.kick_offset)
+    }
+}
+
+// ---------- music director ----------
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum DirectorFeel {
+    Off,
+    Subtle,
+    Cinematic,
+    Theatrical,
+}
+
+pub struct Director {
+    pub feel: DirectorFeel,
+
+    // smoothed audio
+    pub e_short: f32,
+    pub e_long: f32,
+    pub punch_baseline: f32,
+
+    // outputs
+    pub swell: f32,    // 0..~1 sustained build-up
+    pub drop: f32,     // 0..1 transient on big hits, decays
+    pub lull: f32,     // 0..1 quiet sections
+    pub roll_phase: f32,
+
+    pub seed: u32,
+}
+
+impl Default for Director {
+    fn default() -> Self {
+        Self {
+            feel: DirectorFeel::Subtle,
+            e_short: 0.0, e_long: 0.0, punch_baseline: 0.0,
+            swell: 0.0, drop: 0.0, lull: 0.0,
+            roll_phase: 0.0,
+            seed: 1,
+        }
+    }
+}
+
+impl Director {
+    /// Returns the raw drop trigger (>0 if a transient just exceeded the floor).
+    pub fn update(&mut self, audio: &AudioFeatures, dt: f32) -> f32 {
+        let amt: f32 = match self.feel {
+            DirectorFeel::Off => 0.0,
+            DirectorFeel::Subtle => 0.5,
+            DirectorFeel::Cinematic => 1.0,
+            DirectorFeel::Theatrical => 1.6,
+        };
+
+        let alpha_s = 1.0 - (-dt / 0.20).exp();
+        let alpha_l = 1.0 - (-dt / 3.0).exp();
+        let alpha_pb = 1.0 - (-dt / 1.5).exp();
+        self.e_short += alpha_s * (audio.rms - self.e_short);
+        self.e_long += alpha_l * (audio.rms - self.e_long);
+        self.punch_baseline += alpha_pb * (audio.punch - self.punch_baseline);
+
+        // swell: short-term energy exceeding long-term (sustained build-up)
+        let swell_raw = ((self.e_short - self.e_long * 1.05) / (self.e_long + 0.05))
+            .clamp(0.0, 2.0) * 0.5;
+        self.swell += (1.0 - (-dt / 0.45).exp()) * (swell_raw - self.swell);
+
+        // drop: punch substantially above its rolling baseline
+        let drop_trigger = (audio.punch - self.punch_baseline - 0.18).max(0.0);
+        self.drop = (self.drop - dt * 2.4).max(0.0);
+        self.drop = self.drop.max(drop_trigger * 1.4).min(1.0);
+
+        // lull: long-term energy near floor
+        let lull_raw = (1.0 - self.e_long * 5.0).clamp(0.0, 1.0);
+        self.lull += (1.0 - (-dt / 1.0).exp()) * (lull_raw - self.lull);
+
+        self.roll_phase += dt * 0.13;
+
+        // Scale outputs by selected feel.
+        self.swell *= amt.clamp(0.0, 2.0);
+        self.drop *= amt.clamp(0.0, 2.0);
+
+        drop_trigger
+    }
+}
+
+// ---------- lightning ----------
 
 pub struct Lightning {
     pub strength: f32,
-    pub timer: f32,
     pub cooldown: f32,
     pub auto: bool,
-    pub threshold: f32,    // punch above this triggers a strike
+    pub threshold: f32,
     pub cooldown_secs: f32,
     pub peak_intensity: f32,
     pub seed_counter: u32,
@@ -27,16 +229,71 @@ impl Default for Lightning {
     fn default() -> Self {
         Self {
             strength: 0.0,
-            timer: 0.0,
             cooldown: 0.0,
             auto: true,
             threshold: 0.45,
-            cooldown_secs: 0.35,
-            peak_intensity: 1.2,
+            cooldown_secs: 0.40,
+            peak_intensity: 1.1,
             seed_counter: 0,
         }
     }
 }
+
+impl Lightning {
+    fn maybe_trigger(&mut self, punch: f32, dt: f32) -> bool {
+        self.cooldown = (self.cooldown - dt).max(0.0);
+        if self.auto && punch > self.threshold && self.cooldown <= 0.0 {
+            self.cooldown = self.cooldown_secs;
+            self.seed_counter = self.seed_counter.wrapping_add(1);
+            self.strength = self.peak_intensity * (1.0 + (punch - self.threshold) * 1.2);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn force_trigger(&mut self) {
+        self.cooldown = self.cooldown_secs;
+        self.seed_counter = self.seed_counter.wrapping_add(1);
+        self.strength = self.peak_intensity;
+    }
+
+    fn decay(&mut self, dt: f32) {
+        if self.strength > 0.0 {
+            self.strength *= (-12.0 * dt).exp();
+            if self.strength < 0.002 {
+                self.strength = 0.0;
+            }
+        }
+    }
+}
+
+fn build_bolt_path(seed: u32, cam_z: f32, cam_x: f32) -> [[f32; 4]; BOLT_PATH_LEN] {
+    let mut path = [[0.0f32; 4]; BOLT_PATH_LEN];
+    // Start above & in front of camera; end below & a bit further.
+    let ahead = 6.0 + hash_u32(seed, 1) * 5.0;
+    let lateral = (hash_u32(seed, 2) - 0.5) * 4.0 + cam_x * 0.5;
+    let end_lateral = lateral + (hash_u32(seed, 3) - 0.5) * 3.5;
+    let start = [lateral, 5.0, cam_z + ahead];
+    let end = [end_lateral, -5.0, cam_z + ahead + (hash_u32(seed, 4) - 0.5) * 2.0];
+    let n = BOLT_PATH_LEN;
+    for i in 0..n {
+        let t = i as f32 / (n - 1) as f32;
+        let base = [
+            start[0] + (end[0] - start[0]) * t,
+            start[1] + (end[1] - start[1]) * t,
+            start[2] + (end[2] - start[2]) * t,
+        ];
+        // Most jitter in the middle, less at ends.
+        let bell = (1.0 - (2.0 * t - 1.0).abs()).max(0.0);
+        let jx = (hash_u32(seed, 100 + i as u32) - 0.5) * 2.0 * bell;
+        let jz = (hash_u32(seed, 200 + i as u32) - 0.5) * 1.4 * bell;
+        path[i] = [base[0] + jx, base[1], base[2] + jz, 0.0];
+    }
+    path
+}
+
+// ---------- app state ----------
 
 pub struct AppState {
     pub renderer: Renderer,
@@ -48,8 +305,12 @@ pub struct AppState {
     pub start: Instant,
     pub last_frame: Instant,
     pub audio: Audio,
+    pub camera: Camera,
+    pub director: Director,
     pub lightning: Lightning,
     pub palette_index: usize,
+    pub show_ui: bool,
+    pub director_drives_letterbox: bool,
 }
 
 #[derive(Default)]
@@ -59,9 +320,7 @@ pub struct App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
-            return;
-        }
+        if self.state.is_some() { return; }
         let attrs = Window::default_attributes()
             .with_title("shader-experiment — clouds (wgpu)")
             .with_inner_size(winit::dpi::LogicalSize::new(1280, 720));
@@ -88,28 +347,36 @@ impl ApplicationHandler for App {
         params.set_palette(&PALETTES[0].stops);
 
         self.state = Some(AppState {
-            renderer,
-            egui_ctx,
-            egui_state,
-            egui_renderer,
+            renderer, egui_ctx, egui_state, egui_renderer,
             params,
             post: PostParams::default(),
             start: Instant::now(),
             last_frame: Instant::now(),
             audio,
+            camera: Camera::default(),
+            director: Director::default(),
             lightning: Lightning::default(),
             palette_index: 0,
+            show_ui: true,
+            director_drives_letterbox: false,
         });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(s) = self.state.as_mut() else { return; };
-        let _ = s.egui_state.on_window_event(&s.renderer.window, &event);
+        let resp = s.egui_state.on_window_event(&s.renderer.window, &event);
 
-        match event {
+        match &event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(sz) => s.renderer.resize(sz.width, sz.height),
             WindowEvent::RedrawRequested => render_frame(s),
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed && !resp.consumed =>
+            {
+                if let PhysicalKey::Code(code) = event.physical_key {
+                    handle_key(s, event_loop, code);
+                }
+            }
             _ => {}
         }
     }
@@ -121,9 +388,41 @@ impl ApplicationHandler for App {
     }
 }
 
+fn handle_key(s: &mut AppState, event_loop: &ActiveEventLoop, code: KeyCode) {
+    match code {
+        KeyCode::F11 => toggle_fullscreen(s),
+        KeyCode::KeyH => s.show_ui = !s.show_ui,
+        KeyCode::KeyL => {
+            // manual lightning
+            s.lightning.force_trigger();
+            let bolt_x = s.camera.world_pos()[0];
+            s.params.bolt_path = build_bolt_path(s.lightning.seed_counter, s.camera.z, bolt_x);
+            s.params.bolt_count = BOLT_PATH_LEN as f32;
+        }
+        KeyCode::Escape => {
+            if s.renderer.window.fullscreen().is_some() {
+                s.renderer.window.set_fullscreen(None);
+            } else {
+                event_loop.exit();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn toggle_fullscreen(s: &AppState) {
+    if s.renderer.window.fullscreen().is_some() {
+        s.renderer.window.set_fullscreen(None);
+    } else {
+        s.renderer.window.set_fullscreen(Some(Fullscreen::Borderless(None)));
+    }
+}
+
+// ---------- frame ----------
+
 fn render_frame(s: &mut AppState) {
     let now = Instant::now();
-    let dt = (now - s.last_frame).as_secs_f32().min(0.1);
+    let dt = (now - s.last_frame).as_secs_f32().clamp(1e-4, 0.1);
     s.last_frame = now;
 
     let size = s.renderer.window.inner_size();
@@ -138,21 +437,109 @@ fn render_frame(s: &mut AppState) {
     s.params.rms = feat.rms;
     s.params.punch = feat.punch;
 
-    update_lightning(&mut s.lightning, &mut s.params, feat.punch, dt);
+    let drop_trigger = s.director.update(&feat, dt);
+
+    // ---- camera ----
+    let speed = (s.params.speed + s.params.bass * s.params.bass_to_speed
+        + s.director.swell * 1.4).max(0.0);
+    s.camera.integrate(speed, dt);
+    s.camera.smooth_follow(dt);
+
+    // Drop kick: small impulse perpendicular to forward.
+    if drop_trigger > 0.05 {
+        let r1 = hash_u32(s.director.seed, 11) - 0.5;
+        let r2 = hash_u32(s.director.seed, 23) - 0.5;
+        s.director.seed = s.director.seed.wrapping_add(1);
+        let mag = drop_trigger * match s.director.feel {
+            DirectorFeel::Off => 0.0,
+            DirectorFeel::Subtle => 0.6,
+            DirectorFeel::Cinematic => 1.4,
+            DirectorFeel::Theatrical => 2.4,
+        };
+        s.camera.add_kick([r1 * mag, r2 * mag, 0.0]);
+    }
+    s.camera.apply_kick_spring(dt);
+
+    // Roll: very slow oscillation, scaled by swell.
+    let roll_amt = match s.director.feel {
+        DirectorFeel::Off => 0.0,
+        DirectorFeel::Subtle => 0.018,
+        DirectorFeel::Cinematic => 0.045,
+        DirectorFeel::Theatrical => 0.10,
+    };
+    s.camera.roll = s.director.roll_phase.sin() * s.director.swell * roll_amt;
+
+    // Cam zoom (slight push-in on swell).
+    let zoom_pull = match s.director.feel {
+        DirectorFeel::Off => 0.0,
+        DirectorFeel::Subtle => 0.04,
+        DirectorFeel::Cinematic => 0.10,
+        DirectorFeel::Theatrical => 0.18,
+    };
+    s.params.cam_zoom = (1.0 - s.director.swell * zoom_pull).max(0.4);
+
+    // Push camera basis to GPU.
+    s.params.cam_pos = s.camera.world_pos();
+    let (right, up, fwd) = s.camera.basis();
+    s.params.cam_right = right;
+    s.params.cam_up = up;
+    s.params.cam_fwd = fwd;
+
+    // ---- lightning trigger from audio onset ----
+    if s.lightning.maybe_trigger(feat.punch, dt) {
+        let cam_x = s.camera.world_pos()[0];
+        s.params.bolt_path = build_bolt_path(s.lightning.seed_counter, s.camera.z, cam_x);
+        s.params.bolt_count = BOLT_PATH_LEN as f32;
+    }
+    s.lightning.decay(dt);
+    s.params.flash_strength = s.lightning.strength;
+    if s.params.flash_strength <= 0.0 {
+        s.params.bolt_count = 0.0;
+    }
+
+    // ---- director-driven post FX (subtle) ----
+    let base_intensity = s.post.intensity;
+    let base_aberration = s.post.aberration;
+    let base_contrast = s.post.contrast;
+    // Apply transient mods then restore base after writing to GPU.
+    let mod_intensity = base_intensity + s.director.drop * 0.35 + s.director.swell * 0.12;
+    let mod_aberration = base_aberration + s.director.drop * 0.55;
+    let mod_contrast = base_contrast + s.director.drop * 0.10;
+
+    s.post.intensity = mod_intensity;
+    s.post.aberration = mod_aberration;
+    s.post.contrast = mod_contrast;
+    s.post.time = s.params.time;
+    s.post.resolution = s.params.resolution;
+
+    if s.director_drives_letterbox && s.director.feel != DirectorFeel::Off {
+        // gentle pulse: open up to wider aspect on swells if user toggled it
+        let target = 2.39 + s.director.swell * 0.0; // placeholder; keep stable
+        if s.post.letterbox_aspect > 0.5 {
+            s.post.letterbox_aspect = target;
+        }
+    }
 
     // ---- UI ----
     let raw = s.egui_state.take_egui_input(&s.renderer.window);
     let audio_src = s.audio.source_name.clone();
     let prev_palette = s.palette_index;
+    let show_ui = s.show_ui;
     let full = s.egui_ctx.clone().run(raw, |ctx| {
-        ui::build(
-            ctx,
-            &mut s.params,
-            &mut s.post,
-            &mut s.lightning,
-            &mut s.palette_index,
-            &audio_src,
-        );
+        if show_ui {
+            ui::build(
+                ctx,
+                &mut s.params,
+                &mut s.post,
+                &mut s.lightning,
+                &mut s.director,
+                &mut s.camera,
+                &mut s.palette_index,
+                &audio_src,
+            );
+        } else {
+            ui::hint_overlay(ctx);
+        }
     });
     if s.palette_index != prev_palette {
         s.params.set_palette(&PALETTES[s.palette_index].stops);
@@ -173,6 +560,11 @@ fn render_frame(s: &mut AppState) {
     s.renderer.write_cloud_params(&s.params);
     s.renderer.write_post_params(&s.post);
 
+    // Restore base values so UI sliders don't drift with director-driven mods.
+    s.post.intensity = base_intensity;
+    s.post.aberration = base_aberration;
+    s.post.contrast = base_contrast;
+
     let frame = match s.renderer.surface.get_current_texture() {
         Ok(f) => f,
         Err(wgpu::SurfaceError::Outdated) | Err(wgpu::SurfaceError::Lost) => {
@@ -186,12 +578,10 @@ fn render_frame(s: &mut AppState) {
     };
     let view = frame.texture.create_view(&Default::default());
 
-    let mut enc = s
-        .renderer
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+    let mut enc = s.renderer.device.create_command_encoder(
+        &wgpu::CommandEncoderDescriptor { label: Some("frame") });
 
-    // -------- 1. Scene pass → HDR scene texture --------
+    // -------- 1. Scene → HDR --------
     {
         let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("scene-pass"),
@@ -213,7 +603,6 @@ fn render_frame(s: &mut AppState) {
     }
 
     // -------- 2. Bloom: extract → downsample chain --------
-    // Level 0 is produced by extracting from the scene.
     {
         let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("bloom-extract"),
@@ -230,10 +619,9 @@ fn render_frame(s: &mut AppState) {
             occlusion_query_set: None,
         });
         rp.set_pipeline(&s.renderer.extract_pipeline);
-        rp.set_bind_group(0, &s.renderer.targets.bloom_bind_groups[0], &[]); // from scene
+        rp.set_bind_group(0, &s.renderer.targets.bloom_bind_groups[0], &[]);
         rp.draw(0..3, 0..1);
     }
-    // Subsequent levels downsample from the previous.
     for i in 1..s.renderer.targets.bloom_views.len() {
         let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("bloom-downsample"),
@@ -250,12 +638,11 @@ fn render_frame(s: &mut AppState) {
             occlusion_query_set: None,
         });
         rp.set_pipeline(&s.renderer.downsample_pipeline);
-        rp.set_bind_group(0, &s.renderer.targets.bloom_bind_groups[i], &[]); // from bloom[i-1]
+        rp.set_bind_group(0, &s.renderer.targets.bloom_bind_groups[i], &[]);
         rp.draw(0..3, 0..1);
     }
 
-    // -------- 3. Bloom: upsample chain (additive into the lower level) --------
-    // Read from bloom[i], add into bloom[i-1] via the upsample pipeline's additive blend.
+    // -------- 3. Bloom: upsample additively --------
     let levels = s.renderer.targets.bloom_views.len();
     for i in (1..levels).rev() {
         let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -273,12 +660,11 @@ fn render_frame(s: &mut AppState) {
             occlusion_query_set: None,
         });
         rp.set_pipeline(&s.renderer.upsample_pipeline);
-        // bloom_bind_groups index `i+1` reads bloom_views[i].
         rp.set_bind_group(0, &s.renderer.targets.bloom_bind_groups[i + 1], &[]);
         rp.draw(0..3, 0..1);
     }
 
-    // -------- 4. Composite (scene + bloom) → swapchain, then egui on top --------
+    // -------- 4. Composite + UI --------
     s.egui_renderer.update_buffers(
         &s.renderer.device,
         &s.renderer.queue,
@@ -306,7 +692,6 @@ fn render_frame(s: &mut AppState) {
         rp.set_pipeline(&s.renderer.composite_pipeline);
         rp.set_bind_group(0, &s.renderer.targets.composite_bind_group, &[]);
         rp.draw(0..3, 0..1);
-
         s.egui_renderer.render(&mut rp, &paint_jobs, &screen_desc);
     }
 
@@ -316,51 +701,4 @@ fn render_frame(s: &mut AppState) {
     for id in &full.textures_delta.free {
         s.egui_renderer.free_texture(id);
     }
-}
-
-fn update_lightning(l: &mut Lightning, p: &mut CloudParams, punch: f32, dt: f32) {
-    // Cooldown tick.
-    l.cooldown = (l.cooldown - dt).max(0.0);
-
-    // Trigger.
-    if l.auto && punch > l.threshold && l.cooldown <= 0.0 {
-        l.timer = 0.0;
-        l.strength = l.peak_intensity * (1.0 + (punch - l.threshold) * 1.5);
-        l.cooldown = l.cooldown_secs;
-        l.seed_counter = l.seed_counter.wrapping_add(1);
-        // Anchor on screen: random with a bias toward upper half.
-        let r1 = hash_u32(l.seed_counter, 11);
-        let r2 = hash_u32(l.seed_counter, 23);
-        p.bolt_anchor = [0.15 + r1 * 0.70, 0.05 + r2 * 0.45];
-        // World position inside the cloud volume, in front of the camera.
-        let r3 = hash_u32(l.seed_counter, 37) - 0.5;
-        let r4 = hash_u32(l.seed_counter, 53) - 0.5;
-        let r5 = hash_u32(l.seed_counter, 71);
-        let speed = p.speed + p.bass * p.bass_to_speed;
-        let time = p.time * speed;
-        p.flash_pos = [r3 * 4.0, r4 * 3.0, time + 6.0 + r5 * 6.0];
-        p.bolt_seed = l.seed_counter as f32;
-    }
-
-    // Envelope: fast attack handled at trigger, then exponential decay over ~250ms.
-    if l.strength > 0.0 {
-        l.timer += dt;
-        let decay_rate = 14.0; // ~70ms time constant
-        l.strength *= (-decay_rate * dt).exp();
-        if l.strength < 0.002 {
-            l.strength = 0.0;
-        }
-    }
-
-    p.flash_strength = l.strength;
-}
-
-fn hash_u32(seed: u32, salt: u32) -> f32 {
-    let mut x = seed.wrapping_mul(0x9E3779B1).wrapping_add(salt.wrapping_mul(0x85EBCA77));
-    x ^= x >> 16;
-    x = x.wrapping_mul(0x7FEB352D);
-    x ^= x >> 15;
-    x = x.wrapping_mul(0x846CA68B);
-    x ^= x >> 16;
-    (x as f32 / u32::MAX as f32).clamp(0.0, 1.0)
 }

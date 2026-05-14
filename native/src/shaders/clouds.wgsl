@@ -1,6 +1,7 @@
-// Port of Nimitz's "Protean Clouds" (Shadertoy 3l23Rh, CC BY-NC-SA 3.0)
-// with audio-reactive uniforms, lightning injection, and palette grading.
-// Writes scene-linear HDR; bloom + tonemap happen in post.wgsl.
+// Port of Nimitz's "Protean Clouds" (Shadertoy 3l23Rh, CC BY-NC-SA 3.0).
+// Camera basis (pos / right / up / fwd / zoom) is provided by the CPU so we
+// can do smooth follow + audio-driven kicks without re-deriving them in the
+// shader. A 3D bolt path is accumulated as emissive inside the volume march.
 
 struct Params {
     resolution: vec2<f32>,
@@ -13,20 +14,19 @@ struct Params {
     speed: f32, morph: f32, density_mul: f32, hue_shift: f32,
     bass_to_speed: f32, bass_to_morph: f32, centroid_to_hue: f32, rms_to_density: f32,
 
-    flash_pos: vec3<f32>,
-    flash_strength: f32,
+    cam_pos: vec3<f32>, cam_zoom: f32,
+    cam_right: vec3<f32>, _pad3: f32,
+    cam_up: vec3<f32>, _pad4: f32,
+    cam_fwd: vec3<f32>, vignette: f32,
 
-    flash_color: vec3<f32>,
-    bolt_intensity: f32,
+    flash_color: vec3<f32>, flash_strength: f32,
+    bolt_intensity: f32, bolt_width: f32, bolt_glow: f32, bolt_count: f32,
 
-    bolt_anchor: vec2<f32>,
-    bolt_seed: f32,
-    bolt_width: f32,
+    bolt_path: array<vec4<f32>, 8>,
 
     palette_amount: f32,
     palette_centroid_drive: f32,
-    _pad3: f32,
-    _pad4: f32,
+    _pad5: f32, _pad6: f32,
 
     palette0: vec3<f32>, _ps0: f32,
     palette1: vec3<f32>, _ps1: f32,
@@ -69,17 +69,13 @@ fn mag2(p: vec2<f32>) -> f32 { return dot(p, p); }
 fn linstep(mn: f32, mx: f32, x: f32) -> f32 { return clamp((x - mn) / (mx - mn), 0.0, 1.0); }
 fn disp(t: f32) -> vec2<f32> { return vec2<f32>(sin(t * 0.22), cos(t * 0.175)) * 2.0; }
 
-fn hash11(n: f32) -> f32 {
-    return fract(sin(n * 12.9898) * 43758.5453);
-}
-
 fn hue_rotate(c: vec3<f32>, a: f32) -> vec3<f32> {
     let k = vec3<f32>(0.57735026919);
     let co = cos(a); let si = sin(a);
     return c * co + cross(k, c) * si + k * dot(k, c) * (1.0 - co);
 }
 
-fn map_fn(p_in: vec3<f32>, prm1: f32, bs_mo: vec2<f32>, itime: f32) -> vec2<f32> {
+fn map_fn(p_in: vec3<f32>, prm1: f32, itime: f32) -> vec2<f32> {
     var p = p_in;
     let p2_xy = p.xy - disp(p.z).xy;
     let p2 = vec3<f32>(p2_xy, p.z);
@@ -99,15 +95,35 @@ fn map_fn(p_in: vec3<f32>, prm1: f32, bs_mo: vec2<f32>, itime: f32) -> vec2<f32>
         trk = trk * 1.4;
         p = p * m3();
     }
-    d = abs(d + prm1 * 3.0) + prm1 * 0.3 - 2.5 + bs_mo.y;
+    d = abs(d + prm1 * 3.0) + prm1 * 0.3 - 2.5;
     return vec2<f32>(d + cl * 0.2 + 0.25, cl);
+}
+
+fn segment_dist3(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>) -> f32 {
+    let pa = p - a;
+    let ba = b - a;
+    let t = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+    return length(pa - ba * t);
+}
+
+fn bolt_dist3(pos: vec3<f32>) -> f32 {
+    let n = i32(P.bolt_count);
+    if (n < 2) { return 9999.0; }
+    var d = 9999.0;
+    let last = min(n - 1, 7);
+    for (var i = 0; i < 7; i = i + 1) {
+        if (i >= last) { break; }
+        let a = P.bolt_path[i].xyz;
+        let b = P.bolt_path[i + 1].xyz;
+        d = min(d, segment_dist3(pos, a, b));
+    }
+    return d;
 }
 
 fn render_clouds(
     ro: vec3<f32>,
     rd: vec3<f32>,
     prm1: f32,
-    bs_mo: vec2<f32>,
     itime: f32,
     density_boost: f32,
 ) -> vec4<f32> {
@@ -118,7 +134,7 @@ fn render_clouds(
     for (var i = 0; i < 130; i = i + 1) {
         if (rez.a > 0.99) { break; }
         let pos = ro + t * rd;
-        let mpv = map_fn(pos, prm1, bs_mo, itime);
+        let mpv = map_fn(pos, prm1, itime);
         let den = clamp(mpv.x - 0.3, 0.0, 1.0) * 1.12 * density_boost;
         let dn = clamp(mpv.x + 2.0, 0.0, 3.0);
 
@@ -132,21 +148,23 @@ fn render_clouds(
             col = col * (den * den * den);
             col = vec4<f32>(col.rgb * (linstep(4.0, -2.5, mpv.x) * 2.3), col.a);
 
-            var dif = clamp((den - map_fn(pos + 0.8, prm1, bs_mo, itime).x) / 9.0, 0.001, 1.0);
-            dif = dif + clamp((den - map_fn(pos + 0.35, prm1, bs_mo, itime).x) / 2.5, 0.001, 1.0);
+            var dif = clamp((den - map_fn(pos + 0.8, prm1, itime).x) / 9.0, 0.001, 1.0);
+            dif = dif + clamp((den - map_fn(pos + 0.35, prm1, itime).x) / 2.5, 0.001, 1.0);
             let shade = vec3<f32>(0.005, 0.045, 0.075)
                 + 1.5 * vec3<f32>(0.033, 0.07, 0.03) * dif;
             col = vec4<f32>(col.xyz * den * shade, col.a);
+        }
 
-            // Lightning emissive injection — inverse-square falloff from the
-            // flash position, modulated by local density so it lights the cloud.
-            if (flash_on) {
-                let to_flash = P.flash_pos - pos;
-                let d2 = dot(to_flash, to_flash);
-                let att = 1.0 / (1.0 + 0.18 * d2);
-                let emissive = P.flash_color * P.flash_strength * att * den * 1.2;
-                col = vec4<f32>(col.rgb + emissive, col.a);
-            }
+        // 3D bolt: emissive accumulation regardless of density (so the bolt
+        // visually pierces the volume), plus a soft glow that's modulated by
+        // local density (clouds nearest the bolt light up).
+        if (flash_on) {
+            let bd = bolt_dist3(pos);
+            let core = exp(-bd / max(P.bolt_width, 1e-4));
+            let glow = exp(-bd * 0.55);
+            let bolt_emit = P.flash_color * P.flash_strength
+                * (core * P.bolt_intensity + glow * P.bolt_glow * den);
+            col = vec4<f32>(col.rgb + bolt_emit, max(col.a, core * 0.1));
         }
 
         let fog_c = exp(t * 0.2 - 2.2);
@@ -155,7 +173,7 @@ fn render_clouds(
         rez = rez + col * (1.0 - rez.a);
         t = t + clamp(0.5 - dn * dn * 0.05, 0.09, 0.3);
     }
-    return clamp(rez, vec4<f32>(0.0), vec4<f32>(4.0));
+    return clamp(rez, vec4<f32>(0.0), vec4<f32>(8.0));
 }
 
 fn getsat(c: vec3<f32>) -> f32 {
@@ -178,7 +196,6 @@ fn i_lerp(a: vec3<f32>, b: vec3<f32>, x: f32) -> vec3<f32> {
     return clamp(ic, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-// 5-stop palette lookup; x in [0,1].
 fn palette_lookup(x: f32) -> vec3<f32> {
     let xc = clamp(x, 0.0, 1.0) * 4.0;
     let i = floor(xc);
@@ -193,107 +210,36 @@ fn palette_lookup(x: f32) -> vec3<f32> {
     return mix(a, b, ft);
 }
 
-fn segment_dist(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
-    let pa = p - a;
-    let ba = b - a;
-    let t = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
-    return length(pa - ba * t);
-}
-
-// Jagged bolt from top of screen down to anchor, jittered by seed.
-// uv is in aspect-corrected space (x in [-aspect/2, aspect/2], y in [-0.5, 0.5]).
-fn bolt(uv: vec2<f32>, anchor: vec2<f32>, seed: f32) -> f32 {
-    let start = vec2<f32>(anchor.x + (hash11(seed) - 0.5) * 0.4, 0.6);
-    var a = start;
-    var d = 9999.0;
-    let segments = 14;
-    for (var i = 0; i < segments; i = i + 1) {
-        let t = f32(i + 1) / f32(segments);
-        let off = (hash11(seed + f32(i) * 7.3) - 0.5) * 0.16 * (1.0 - t);
-        let drift = (hash11(seed + f32(i) * 3.1 + 11.0) - 0.5) * 0.04;
-        let b = mix(start, anchor, t) + vec2<f32>(off, drift);
-        d = min(d, segment_dist(uv, a, b));
-        // Tiny branch every few segments.
-        if ((i == 4) || (i == 9)) {
-            let branch_end = b + vec2<f32>(
-                (hash11(seed + f32(i) * 2.1) - 0.5) * 0.3,
-                -hash11(seed + f32(i) * 4.7) * 0.2,
-            );
-            d = min(d, segment_dist(uv, b, branch_end));
-        }
-        a = b;
-    }
-    return d;
-}
-
 @fragment
 fn fs_clouds(in: VsOut) -> @location(0) vec4<f32> {
-    let frag_coord = in.uv * P.resolution;
     let q = in.uv;
-    let p = (frag_coord - 0.5 * P.resolution) / P.resolution.y;
-    let bs_mo = vec2<f32>(0.0);
+    let frag_coord = q * P.resolution;
+    let p = (frag_coord - 0.5 * P.resolution) / P.resolution.y * P.cam_zoom;
 
     let itime = P.time;
-    let speed = P.speed + P.bass * P.bass_to_speed;
-    let time = itime * speed;
-
-    var ro = vec3<f32>(0.0, 0.0, time);
-    ro = ro + vec3<f32>(sin(itime) * 0.5, 0.0, 0.0);
-
-    let dsp_amp = 0.85;
-    let d_xy = disp(ro.z) * dsp_amp;
-    ro = vec3<f32>(ro.xy + d_xy, ro.z);
-
-    let tgt_dst = 3.5;
-    let tgt_disp = disp(time + tgt_dst) * dsp_amp;
-    var tgt = normalize(ro - vec3<f32>(tgt_disp, time + tgt_dst));
-    ro.x = ro.x - bs_mo.x * 2.0;
-
-    var rightdir = normalize(cross(tgt, vec3<f32>(0.0, 1.0, 0.0)));
-    let updir = normalize(cross(rightdir, tgt));
-    rightdir = normalize(cross(updir, tgt));
-    var rd = normalize((p.x * rightdir + p.y * updir) - tgt);
-
-    let r2 = rot(-disp(time + 3.5).x * 0.2 + bs_mo.x);
-    let rdxy = rd.xy * r2;
-    rd = vec3<f32>(rdxy, rd.z);
-
-    let base_prm = smoothstep(-0.4, 0.4, sin(itime * 0.3));
-    let prm1 = clamp(base_prm + P.morph + P.bass * P.bass_to_morph, 0.0, 1.6);
+    let prm1_base = smoothstep(-0.4, 0.4, sin(itime * 0.3));
+    let prm1 = clamp(prm1_base + P.morph + P.bass * P.bass_to_morph, 0.0, 1.6);
     let density_boost = P.density_mul + P.rms * P.rms_to_density + P.punch * 0.4;
 
-    let scn = render_clouds(ro, rd, prm1, bs_mo, itime, density_boost);
+    let ro = P.cam_pos;
+    let rd = normalize(p.x * P.cam_right + p.y * P.cam_up + P.cam_fwd);
 
+    let scn = render_clouds(ro, rd, prm1, itime, density_boost);
     var col = scn.rgb;
     col = i_lerp(col.bgr, col.rgb, clamp(1.0 - prm1, 0.05, 1.0));
-    // Nimitz's original grade — kept and crossfaded with palette.
     let nimitz = pow(col, vec3<f32>(0.55, 0.65, 0.6)) * vec3<f32>(1.0, 0.97, 0.9);
 
-    // Palette lookup keyed on luminance with centroid offset.
     let lum = dot(col, vec3<f32>(0.299, 0.587, 0.114));
-    let pal_x = clamp(
-        lum + (P.centroid - 0.5) * P.palette_centroid_drive,
-        0.0, 1.0,
-    );
+    let pal_x = clamp(lum + (P.centroid - 0.5) * P.palette_centroid_drive, 0.0, 1.0);
     let graded = palette_lookup(pal_x) * (0.5 + 0.8 * lum);
 
     col = mix(nimitz, graded, P.palette_amount);
     col = hue_rotate(col, P.hue_shift + (P.centroid - 0.5) * P.centroid_to_hue);
 
-    // Vignette.
-    col = col * (pow(16.0 * q.x * q.y * (1.0 - q.x) * (1.0 - q.y), 0.12) * 0.7 + 0.3);
-
-    // 2D bolt overlay — additive emissive.
-    if (P.flash_strength > 0.0001) {
-        let aspect = P.resolution.x / max(P.resolution.y, 1.0);
-        let uv = vec2<f32>((q.x - 0.5) * aspect, q.y - 0.5);
-        let anchor = vec2<f32>((P.bolt_anchor.x - 0.5) * aspect, P.bolt_anchor.y - 0.5);
-        let bd = bolt(uv, anchor, P.bolt_seed);
-        let core = exp(-bd / max(P.bolt_width, 1e-4));
-        let halo = exp(-bd / max(P.bolt_width * 9.0, 1e-4)) * 0.35;
-        let bolt_emit = (core + halo) * P.flash_strength * P.bolt_intensity;
-        col = col + P.flash_color * bolt_emit;
-    }
+    // Vignette. v=0 → no darkening, v=1 → full corners-go-to-zero.
+    let v = clamp(P.vignette, 0.0, 1.0);
+    let vfac = pow(16.0 * q.x * q.y * (1.0 - q.x) * (1.0 - q.y), 0.12);
+    col = col * mix(vec3<f32>(1.0), vec3<f32>(vfac), v);
 
     return vec4<f32>(col, 1.0);
 }
