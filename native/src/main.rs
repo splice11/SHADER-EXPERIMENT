@@ -1,5 +1,6 @@
 mod app;
 mod audio;
+mod bake;
 mod palettes;
 mod params;
 mod renderer;
