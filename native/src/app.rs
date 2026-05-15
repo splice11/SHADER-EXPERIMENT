@@ -614,23 +614,28 @@ fn render_frame(s: &mut AppState) {
         s.params.bolt_count = 0.0;
     }
 
-    // ---- director-driven post FX ----
+    // ---- director-driven post FX + tunnel glow ----
     let base_intensity = s.post.intensity;
     let base_aberration = s.post.aberration;
     let base_contrast = s.post.contrast;
     let base_saturation = s.post.saturation;
+    let base_tunnel_glow = s.params.tunnel_glow;
 
-    let mod_intensity = base_intensity + scaled_drop * 0.30 + scaled_swell * 0.10;
-    let mod_aberration = base_aberration + scaled_drop * 0.45;
+    let mod_intensity = base_intensity + scaled_drop * 0.25 + scaled_swell * 0.08;
+    let mod_aberration = base_aberration + scaled_drop * 0.40;
     let mod_contrast = base_contrast + scaled_drop * 0.08;
-    // Lull desaturates a little for that "quiet bridge" feel.
+    // Lull desaturates the grade AND dims the end-of-tunnel glow so quiet
+    // bridges visibly go darker.
     let mod_saturation = (base_saturation
         - s.director.lull * amt * 0.25).max(0.0);
+    let mod_tunnel_glow = (base_tunnel_glow
+        * (1.0 - s.director.lull * amt * 0.65)).max(0.0);
 
     s.post.intensity = mod_intensity;
     s.post.aberration = mod_aberration;
     s.post.contrast = mod_contrast;
     s.post.saturation = mod_saturation;
+    s.params.tunnel_glow = mod_tunnel_glow;
     s.post.time = s.params.time;
     s.post.resolution = s.params.resolution;
 
@@ -683,6 +688,7 @@ fn render_frame(s: &mut AppState) {
     s.post.aberration = base_aberration;
     s.post.contrast = base_contrast;
     s.post.saturation = base_saturation;
+    s.params.tunnel_glow = base_tunnel_glow;
 
     let frame = match s.renderer.surface.get_current_texture() {
         Ok(f) => f,

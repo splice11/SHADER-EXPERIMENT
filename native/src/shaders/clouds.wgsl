@@ -33,6 +33,11 @@ struct Params {
     palette2: vec3<f32>, _ps2: f32,
     palette3: vec3<f32>, _ps3: f32,
     palette4: vec3<f32>, _ps4: f32,
+
+    tunnel_glow: f32,
+    morph_cap: f32,
+    color_variance: f32,
+    bolt_saturation: f32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -120,6 +125,11 @@ fn bolt_dist3(pos: vec3<f32>) -> f32 {
     return d;
 }
 
+fn saturate_color(c: vec3<f32>, sat: f32) -> vec3<f32> {
+    let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return max(mix(vec3<f32>(lum), c, sat), vec3<f32>(0.0));
+}
+
 fn render_clouds(
     ro: vec3<f32>,
     rd: vec3<f32>,
@@ -131,7 +141,17 @@ fn render_clouds(
     var t = 1.5;
     var fog_t = 0.0;
     let flash_on = P.flash_strength > 0.0001;
-    for (var i = 0; i < 130; i = i + 1) {
+    // Tunnel glow base colour: original blue-grey crossfaded with a palette
+    // mid-tone so dark palettes get a darker end-of-tunnel.
+    let palette_mid = mix(P.palette1, P.palette3, 0.55);
+    let tunnel_col_base = mix(vec3<f32>(0.06, 0.11, 0.11),
+                              palette_mid * 0.35,
+                              clamp(P.palette_amount, 0.0, 1.0));
+    let tunnel_col = tunnel_col_base * P.tunnel_glow;
+
+    // 160 steps with a tighter floor on the per-step distance — more wisp
+    // detail in dense regions for ~25% more cost.
+    for (var i = 0; i < 160; i = i + 1) {
         if (rez.a > 0.99) { break; }
         let pos = ro + t * rd;
         let mpv = map_fn(pos, prm1, itime);
@@ -140,7 +160,19 @@ fn render_clouds(
 
         var col = vec4<f32>(0.0);
         if (mpv.x > 0.6) {
-            let base = sin(vec3<f32>(5.0, 0.4, 0.2)
+            // Per-sample hue-phase variation: neighbouring puffs land on
+            // different parts of the colour cycle. color_variance=0 reproduces
+            // the original Nimitz colour pattern exactly.
+            let v = P.color_variance;
+            let phase_drift = (sin(pos.x * 0.35)
+                             + cos(pos.z * 0.25 + 1.7)
+                             + sin(pos.y * 0.55)) * 0.75 * v;
+            let phases = vec3<f32>(
+                5.0 + phase_drift,
+                0.4 + phase_drift * 0.8,
+                0.2 + phase_drift * 0.55,
+            );
+            let base = sin(phases
                 + mpv.y * 0.1
                 + sin(pos.z * 0.4) * 0.5
                 + 1.8) * 0.5 + 0.5;
@@ -155,23 +187,23 @@ fn render_clouds(
             col = vec4<f32>(col.xyz * den * shade, col.a);
         }
 
-        // 3D bolt: emissive accumulation regardless of density (so the bolt
-        // visually pierces the volume), plus a soft glow that's modulated by
-        // local density (clouds nearest the bolt light up).
+        // 3D bolt: emissive accumulation. Apply saturation push so the core's
+        // colour survives ACES tonemap instead of clipping to white.
         if (flash_on) {
             let bd = bolt_dist3(pos);
             let core = exp(-bd / max(P.bolt_width, 1e-4));
             let glow = exp(-bd * 0.55);
-            let bolt_emit = P.flash_color * P.flash_strength
+            let raw = P.flash_color * P.flash_strength
                 * (core * P.bolt_intensity + glow * P.bolt_glow * den);
-            col = vec4<f32>(col.rgb + bolt_emit, max(col.a, core * 0.1));
+            let tinted = saturate_color(raw, P.bolt_saturation);
+            col = vec4<f32>(col.rgb + tinted, max(col.a, core * 0.1));
         }
 
         let fog_c = exp(t * 0.2 - 2.2);
-        col = col + vec4<f32>(0.06, 0.11, 0.11, 0.1) * clamp(fog_c - fog_t, 0.0, 1.0);
+        col = col + vec4<f32>(tunnel_col, 0.1) * clamp(fog_c - fog_t, 0.0, 1.0);
         fog_t = fog_c;
         rez = rez + col * (1.0 - rez.a);
-        t = t + clamp(0.5 - dn * dn * 0.05, 0.09, 0.3);
+        t = t + clamp(0.5 - dn * dn * 0.05, 0.07, 0.28);
     }
     return clamp(rez, vec4<f32>(0.0), vec4<f32>(8.0));
 }
@@ -218,7 +250,11 @@ fn fs_clouds(in: VsOut) -> @location(0) vec4<f32> {
 
     let itime = P.time;
     let prm1_base = smoothstep(-0.4, 0.4, sin(itime * 0.3));
-    let prm1 = clamp(prm1_base + P.morph + P.bass * P.bass_to_morph, 0.0, 1.6);
+    // morph_cap controls how plumey/closed the tunnel can get. The original
+    // shader allowed prm1 up to 1.6 which produces wall-of-cloud moments —
+    // capping ~1.0 keeps the tunnel breathable.
+    let prm1 = clamp(prm1_base + P.morph + P.bass * P.bass_to_morph,
+                     0.0, max(P.morph_cap, 0.1));
     // Density boost is hard-capped so transient hits / sustained bass can't
     // drown the camera in fog. Crank density_mul if you really want soup.
     let density_boost = clamp(

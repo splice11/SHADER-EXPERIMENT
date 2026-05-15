@@ -95,6 +95,16 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
                     ui.add(egui::Slider::new(&mut p.hue_shift, -3.14..=3.14));
                 });
 
+                egui::CollapsingHeader::new("look").default_open(true).show(ui, |ui| {
+                    ui.label("tunnel glow (end-of-tunnel brightness)");
+                    ui.add(egui::Slider::new(&mut p.tunnel_glow, 0.0..=2.0));
+                    ui.small("director lull dims this on quiet sections.");
+                    ui.label("plumey cap (limits how closed the tunnel gets)");
+                    ui.add(egui::Slider::new(&mut p.morph_cap, 0.30..=1.6));
+                    ui.label("colour variance (per-puff hue spread)");
+                    ui.add(egui::Slider::new(&mut p.color_variance, 0.0..=1.5));
+                });
+
                 egui::CollapsingHeader::new("lightning").default_open(true).show(ui, |ui| {
                     ui.checkbox(&mut lightning.auto, "auto-trigger on audio");
                     ui.label("punch threshold");
@@ -109,6 +119,8 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
                     ui.add(egui::Slider::new(&mut p.bolt_intensity, 0.0..=12.0));
                     ui.label("bolt cloud glow");
                     ui.add(egui::Slider::new(&mut p.bolt_glow, 0.0..=4.0));
+                    ui.label("bolt colour saturation");
+                    ui.add(egui::Slider::new(&mut p.bolt_saturation, 0.0..=3.0));
                     color_picker(ui, "flash colour", &mut p.flash_color);
                 });
 
