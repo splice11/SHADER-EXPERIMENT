@@ -175,6 +175,9 @@ pub struct Director {
     pub swell: f32,
     pub drop: f32,
     pub lull: f32,
+    /// Sustained-silence envelope: rises only after several seconds of
+    /// near-zero RMS. Used to drive the "empty tunnel when no music" look.
+    pub silence: f32,
 
     // section state w/ hysteresis
     pub section: Section,
@@ -201,7 +204,7 @@ impl Default for Director {
             feel: DirectorFeel::Subtle,
             e_short: 0.0, e_long: 0.0, e_very_long: 0.0,
             punch_baseline: 0.0,
-            swell: 0.0, drop: 0.0, lull: 0.0,
+            swell: 0.0, drop: 0.0, lull: 0.0, silence: 0.0,
             section: Section::Cruise,
             section_age: 0.0,
             section_changed_at: 0.0,
@@ -251,6 +254,16 @@ impl Director {
         let lull_raw = (1.0 - self.e_long * 5.0).clamp(0.0, 1.0);
         self.lull += (1.0 - (-dt / 1.0).exp()) * (lull_raw - self.lull);
         self.lull = self.lull.clamp(0.0, 1.0);
+
+        // Silence: requires sustained near-zero RMS to engage. Drives the
+        // "no clouds when no music" effect. Asymmetric attack/release: slow
+        // to engage (so brief quiet passages don't dissolve the scene), fast
+        // to release (clouds reappear as soon as the music kicks back in).
+        let silent = self.e_long < 0.04 && self.e_very_long < 0.05;
+        let silence_target = if silent { 1.0 } else { 0.0 };
+        let silence_tau = if silent { 2.5 } else { 0.6 };
+        self.silence += (1.0 - (-dt / silence_tau).exp()) * (silence_target - self.silence);
+        self.silence = self.silence.clamp(0.0, 1.0);
 
         // Beat-ish onset interval estimate. Each big drop is treated as an
         // onset; we collect a rolling window of inter-onset intervals and use
@@ -650,14 +663,22 @@ fn render_frame(s: &mut AppState) {
     let base_saturation = s.post.saturation;
     let base_tunnel_glow = s.params.tunnel_glow;
     let base_cam_zoom = s.params.cam_zoom;
+    let base_density_mul = s.params.density_mul;
 
     s.post.intensity = base_intensity + scaled_drop * 0.25 + scaled_swell * 0.08;
     s.post.aberration = base_aberration + scaled_drop * 0.40;
     s.post.contrast = base_contrast + scaled_drop * 0.08;
     s.post.saturation = (base_saturation - s.director.lull * amt * 0.25).max(0.0);
-    s.params.tunnel_glow = (base_tunnel_glow * (1.0 - s.director.lull * amt * 0.65)).max(0.0);
-    // Push-in zoom: multiply the user's base zoom by a swell factor so the
-    // base slider is respected and the director adds a transient push-in.
+    // Silence fades both the clouds and the end-of-tunnel glow toward zero
+    // so a quiet bridge leaves us in an empty dark tunnel; lull contributes a
+    // milder dim on top. Both knobs are restored at end-of-frame so the UI
+    // sliders show the user's base value.
+    let silence_amt = s.director.silence;
+    s.params.tunnel_glow = (base_tunnel_glow
+        * (1.0 - s.director.lull * amt * 0.30)
+        * (1.0 - silence_amt * 0.95)).max(0.0);
+    s.params.density_mul = base_density_mul * (1.0 - silence_amt * 0.95);
+    // Push-in zoom: multiply the user's base zoom by a swell factor.
     s.params.cam_zoom = (base_cam_zoom * (1.0 - scaled_swell * 0.08)).max(0.10);
     s.post.time = s.params.time;
     s.post.resolution = s.params.resolution;
@@ -680,6 +701,7 @@ fn render_frame(s: &mut AppState) {
     s.post.saturation = base_saturation;
     s.params.tunnel_glow = base_tunnel_glow;
     s.params.cam_zoom = base_cam_zoom;
+    s.params.density_mul = base_density_mul;
 
     let frame = match s.renderer.surface.get_current_texture() {
         Ok(f) => f,

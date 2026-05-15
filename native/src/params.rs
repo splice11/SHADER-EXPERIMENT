@@ -129,7 +129,7 @@ impl Default for CloudParams {
             morph_cap: 0.95,
             color_variance: 0.40,
             bolt_saturation: 1.6,
-            god_ray_strength: 1.5,
+            god_ray_strength: 1.0,
             _pad_extra0: 0.0,
             _pad_extra1: 0.0,
             _pad_extra2: 0.0,

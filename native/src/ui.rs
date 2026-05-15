@@ -56,6 +56,7 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
                     bar(ui, "swell", director.swell);
                     bar(ui, "drop", director.drop);
                     bar(ui, "lull", director.lull);
+                    bar(ui, "silence", director.silence);
                     let bpm = director.bpm();
                     ui.label(format!(
                         "section: {:?}   bpm: {}",

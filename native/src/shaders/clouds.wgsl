@@ -155,18 +155,17 @@ fn nearest_bolt_point(p: vec3<f32>) -> vec3<f32> {
 
 // Integrate density along the segment from `start` to `end` to get optical
 // depth — used to attenuate light coming from the bolt through the cloud.
+// 2 samples is enough at the scales we're working with (the cloud is blobby,
+// so finer shadow sampling buys very little visual gain for 2x cost).
 fn shadow_march(start: vec3<f32>, end: vec3<f32>, prm1: f32, itime: f32) -> f32 {
     let dir = end - start;
     let dist = length(dir);
     if (dist < 0.01) { return 0.0; }
-    var density_sum = 0.0;
-    for (var k = 1; k <= 4; k = k + 1) {
-        let frac = f32(k) / 5.0;
-        let sp = start + dir * frac;
-        let sd = max(map_fn(sp, prm1, itime).x - 0.3, 0.0);
-        density_sum = density_sum + sd;
-    }
-    return density_sum * (dist / 5.0);
+    let s1 = start + dir * 0.33;
+    let s2 = start + dir * 0.66;
+    let d1 = max(map_fn(s1, prm1, itime).x - 0.3, 0.0);
+    let d2 = max(map_fn(s2, prm1, itime).x - 0.3, 0.0);
+    return (d1 + d2) * dist * 0.33;
 }
 
 fn saturate_color(c: vec3<f32>, sat: f32) -> vec3<f32> {
@@ -239,10 +238,10 @@ fn render_clouds(
             let bd = bolt_dist3(pos);
             let core = exp(-bd / max(P.bolt_width, 1e-4));
             var scatter = vec3<f32>(0.0);
-            // Only do the shadow march in actually cloudy samples that are
-            // close enough to the bolt for it to matter. Empty-space samples
-            // and far-away samples skip the cost.
-            if (den > 0.05 && bd < 22.0) {
+            // Strict culling: only do the shadow march on real cloud samples
+            // close to the bolt. Most strike-frame perf was lost to thin /
+            // distant samples that contributed almost nothing visually.
+            if (den > 0.12 && bd < 14.0) {
                 let nearest = nearest_bolt_point(pos);
                 let od = shadow_march(pos, nearest, prm1, itime);
                 let transmittance = exp(-od * max(P.god_ray_strength, 0.0));
@@ -311,11 +310,12 @@ fn fs_clouds(in: VsOut) -> @location(0) vec4<f32> {
     // capping ~1.0 keeps the tunnel breathable.
     let prm1 = clamp(prm1_base + P.morph + P.bass * P.bass_to_morph,
                      0.0, max(P.morph_cap, 0.1));
-    // Density boost is hard-capped so transient hits / sustained bass can't
-    // drown the camera in fog. Crank density_mul if you really want soup.
+    // Density boost is hard-capped at the top so transients can't drown the
+    // camera in fog, but the floor is 0 so the director can fade the clouds
+    // all the way out during silence ("empty tunnel" effect).
     let density_boost = clamp(
         P.density_mul + P.rms * P.rms_to_density + P.punch * 0.25,
-        0.5, 1.45,
+        0.0, 1.45,
     );
 
     let ro = P.cam_pos;
