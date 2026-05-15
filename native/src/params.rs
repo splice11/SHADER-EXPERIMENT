@@ -72,6 +72,11 @@ pub struct CloudParams {
     pub morph_cap: f32,
     pub color_variance: f32,
     pub bolt_saturation: f32,
+
+    pub god_ray_strength: f32,
+    pub _pad_extra0: f32,
+    pub _pad_extra1: f32,
+    pub _pad_extra2: f32,
 }
 
 impl Default for CloudParams {
@@ -124,6 +129,10 @@ impl Default for CloudParams {
             morph_cap: 0.95,
             color_variance: 0.40,
             bolt_saturation: 1.6,
+            god_ray_strength: 1.5,
+            _pad_extra0: 0.0,
+            _pad_extra1: 0.0,
+            _pad_extra2: 0.0,
         }
     }
 }

@@ -38,6 +38,11 @@ struct Params {
     morph_cap: f32,
     color_variance: f32,
     bolt_saturation: f32,
+
+    god_ray_strength: f32,
+    _pad_extra0: f32,
+    _pad_extra1: f32,
+    _pad_extra2: f32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -125,6 +130,45 @@ fn bolt_dist3(pos: vec3<f32>) -> f32 {
     return d;
 }
 
+// Closest point on the bolt polyline to `p`. Used as the per-sample "light
+// source" for the god-ray shadow march.
+fn nearest_bolt_point(p: vec3<f32>) -> vec3<f32> {
+    let n = i32(P.bolt_count);
+    if (n < 2) { return p; }
+    var nearest = p;
+    var best = 1.0e9;
+    let last = min(n - 1, 7);
+    for (var i = 0; i < 7; i = i + 1) {
+        if (i >= last) { break; }
+        let a = P.bolt_path[i].xyz;
+        let b = P.bolt_path[i + 1].xyz;
+        let pa = p - a;
+        let ba = b - a;
+        let t = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+        let cp = a + ba * t;
+        let dv = p - cp;
+        let d2 = dot(dv, dv);
+        if (d2 < best) { best = d2; nearest = cp; }
+    }
+    return nearest;
+}
+
+// Integrate density along the segment from `start` to `end` to get optical
+// depth — used to attenuate light coming from the bolt through the cloud.
+fn shadow_march(start: vec3<f32>, end: vec3<f32>, prm1: f32, itime: f32) -> f32 {
+    let dir = end - start;
+    let dist = length(dir);
+    if (dist < 0.01) { return 0.0; }
+    var density_sum = 0.0;
+    for (var k = 1; k <= 4; k = k + 1) {
+        let frac = f32(k) / 5.0;
+        let sp = start + dir * frac;
+        let sd = max(map_fn(sp, prm1, itime).x - 0.3, 0.0);
+        density_sum = density_sum + sd;
+    }
+    return density_sum * (dist / 5.0);
+}
+
 fn saturate_color(c: vec3<f32>, sat: f32) -> vec3<f32> {
     let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
     return max(mix(vec3<f32>(lum), c, sat), vec3<f32>(0.0));
@@ -187,15 +231,27 @@ fn render_clouds(
             col = vec4<f32>(col.xyz * den * shade, col.a);
         }
 
-        // 3D bolt: emissive accumulation. Apply saturation push so the core's
-        // colour survives ACES tonemap instead of clipping to white.
+        // 3D bolt: emissive accumulation. The core is unattenuated emission
+        // (the visible bolt). The "scatter" term is in-scattering from the
+        // bolt into the cloud — for that, we need to know how much cloud sits
+        // between this sample and the bolt, which is the god-ray effect.
         if (flash_on) {
             let bd = bolt_dist3(pos);
             let core = exp(-bd / max(P.bolt_width, 1e-4));
-            let glow = exp(-bd * 0.55);
-            let raw = P.flash_color * P.flash_strength
-                * (core * P.bolt_intensity + glow * P.bolt_glow * den);
-            let tinted = saturate_color(raw, P.bolt_saturation);
+            var scatter = vec3<f32>(0.0);
+            // Only do the shadow march in actually cloudy samples that are
+            // close enough to the bolt for it to matter. Empty-space samples
+            // and far-away samples skip the cost.
+            if (den > 0.05 && bd < 22.0) {
+                let nearest = nearest_bolt_point(pos);
+                let od = shadow_march(pos, nearest, prm1, itime);
+                let transmittance = exp(-od * max(P.god_ray_strength, 0.0));
+                let glow = exp(-bd * 0.55) * transmittance;
+                scatter = P.flash_color * P.flash_strength
+                    * glow * P.bolt_glow * den * 1.6;
+            }
+            let core_emit = P.flash_color * P.flash_strength * core * P.bolt_intensity;
+            let tinted = saturate_color(core_emit + scatter, P.bolt_saturation);
             col = vec4<f32>(col.rgb + tinted, max(col.a, core * 0.1));
         }
 
