@@ -66,6 +66,12 @@ pub struct CloudParams {
     pub palette2: [f32; 3], pub _ps2: f32,
     pub palette3: [f32; 3], pub _ps3: f32,
     pub palette4: [f32; 3], pub _ps4: f32,
+
+    // Aesthetic knobs added in the lightning/colour/detail pass.
+    pub tunnel_glow: f32,
+    pub morph_cap: f32,
+    pub color_variance: f32,
+    pub bolt_saturation: f32,
 }
 
 impl Default for CloudParams {
@@ -82,9 +88,9 @@ impl Default for CloudParams {
             speed: 3.0, morph: 0.0, density_mul: 1.0, hue_shift: 0.0,
 
             bass_to_speed: 3.0,
-            bass_to_morph: 0.6,
+            bass_to_morph: 0.30,
             centroid_to_hue: 0.0,
-            rms_to_density: 0.5,
+            rms_to_density: 0.45,
 
             cam_pos: [0.0, 0.0, 0.0],
             cam_zoom: 1.0,
@@ -97,9 +103,9 @@ impl Default for CloudParams {
 
             flash_color: [0.78, 0.88, 1.20],
             flash_strength: 0.0,
-            bolt_intensity: 4.0,
-            bolt_width: 0.18,
-            bolt_glow: 1.2,
+            bolt_intensity: 2.4,
+            bolt_width: 0.24,
+            bolt_glow: 1.4,
             bolt_count: 0.0,
 
             bolt_path: [[0.0; 4]; BOLT_PATH_LEN],
@@ -113,6 +119,11 @@ impl Default for CloudParams {
             palette2: p[2], _ps2: 0.0,
             palette3: p[3], _ps3: 0.0,
             palette4: p[4], _ps4: 0.0,
+
+            tunnel_glow: 1.0,
+            morph_cap: 0.95,
+            color_variance: 0.40,
+            bolt_saturation: 1.6,
         }
     }
 }
@@ -153,9 +164,9 @@ pub struct PostParams {
 impl Default for PostParams {
     fn default() -> Self {
         Self {
-            threshold: 1.0,
-            knee: 0.4,
-            intensity: 0.55,
+            threshold: 1.1,
+            knee: 0.5,
+            intensity: 0.38,
             exposure: 1.0,
 
             contrast: 1.08,

@@ -33,6 +33,11 @@ struct Params {
     palette2: vec3<f32>, _ps2: f32,
     palette3: vec3<f32>, _ps3: f32,
     palette4: vec3<f32>, _ps4: f32,
+
+    tunnel_glow: f32,
+    morph_cap: f32,
+    color_variance: f32,
+    bolt_saturation: f32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
