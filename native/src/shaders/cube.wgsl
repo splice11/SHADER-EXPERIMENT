@@ -38,6 +38,11 @@ struct Params {
     morph_cap: f32,
     color_variance: f32,
     bolt_saturation: f32,
+
+    god_ray_strength: f32,
+    _pad_extra0: f32,
+    _pad_extra1: f32,
+    _pad_extra2: f32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;

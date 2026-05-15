@@ -572,36 +572,6 @@ fn render_frame(s: &mut AppState) {
         s.director.palette_cooldown = 0.0;
     }
 
-    // ---- camera ----
-    let speed = (s.params.speed + s.params.bass * s.params.bass_to_speed
-        + scaled_swell * 0.9).max(0.0);
-    s.camera.integrate(speed, dt);
-    s.camera.smooth_follow(dt);
-
-    // Drop kick: small impulse perpendicular to forward, magnitude scaled by feel.
-    if tick.drop_trigger > 0.05 {
-        let r1 = hash_u32(s.director.seed, 11) - 0.5;
-        let r2 = hash_u32(s.director.seed, 23) - 0.5;
-        s.director.seed = s.director.seed.wrapping_add(1);
-        let mag = tick.drop_trigger * amt * 1.4;
-        s.camera.add_kick([r1 * mag, r2 * mag, 0.0]);
-    }
-    s.camera.apply_kick_spring(dt);
-
-    // Roll: very slow oscillation, scaled by swell + feel.
-    s.camera.roll = s.director.roll_phase.sin() * scaled_swell * 0.035;
-
-    // Cam zoom (push-in on swell). Reduced compared to before since swell is
-    // unscaled here — feel acts as the lever.
-    s.params.cam_zoom = (1.0 - scaled_swell * 0.08).max(0.4);
-
-    // Push camera basis to GPU.
-    s.params.cam_pos = s.camera.world_pos();
-    let (right, up, fwd) = s.camera.basis();
-    s.params.cam_right = right;
-    s.params.cam_up = up;
-    s.params.cam_fwd = fwd;
-
     // ---- lightning trigger from audio onset ----
     if s.lightning.maybe_trigger(feat.punch, dt) {
         let cam_x = s.camera.world_pos()[0];
@@ -614,32 +584,9 @@ fn render_frame(s: &mut AppState) {
         s.params.bolt_count = 0.0;
     }
 
-    // ---- director-driven post FX + tunnel glow ----
-    let base_intensity = s.post.intensity;
-    let base_aberration = s.post.aberration;
-    let base_contrast = s.post.contrast;
-    let base_saturation = s.post.saturation;
-    let base_tunnel_glow = s.params.tunnel_glow;
-
-    let mod_intensity = base_intensity + scaled_drop * 0.25 + scaled_swell * 0.08;
-    let mod_aberration = base_aberration + scaled_drop * 0.40;
-    let mod_contrast = base_contrast + scaled_drop * 0.08;
-    // Lull desaturates the grade AND dims the end-of-tunnel glow so quiet
-    // bridges visibly go darker.
-    let mod_saturation = (base_saturation
-        - s.director.lull * amt * 0.25).max(0.0);
-    let mod_tunnel_glow = (base_tunnel_glow
-        * (1.0 - s.director.lull * amt * 0.65)).max(0.0);
-
-    s.post.intensity = mod_intensity;
-    s.post.aberration = mod_aberration;
-    s.post.contrast = mod_contrast;
-    s.post.saturation = mod_saturation;
-    s.params.tunnel_glow = mod_tunnel_glow;
-    s.post.time = s.params.time;
-    s.post.resolution = s.params.resolution;
-
-    // ---- UI ----
+    // ---- UI first: user knob edits land on s.params/s.post BEFORE the
+    // director-driven modulation overwrites them, so dragged sliders don't
+    // snap back to base each frame. ----
     let raw = s.egui_state.take_egui_input(&s.renderer.window);
     let audio_src = s.audio.source_name.clone();
     let prev_palette = s.palette_index;
@@ -680,15 +627,59 @@ fn render_frame(s: &mut AppState) {
             .update_texture(&s.renderer.device, &s.renderer.queue, *id, delta);
     }
 
+    // ---- camera (uses user-set s.params.speed, which is now the post-UI value) ----
+    let speed = (s.params.speed + s.params.bass * s.params.bass_to_speed
+        + scaled_swell * 0.9).max(0.0);
+    s.camera.integrate(speed, dt);
+    s.camera.smooth_follow(dt);
+
+    if tick.drop_trigger > 0.05 {
+        let r1 = hash_u32(s.director.seed, 11) - 0.5;
+        let r2 = hash_u32(s.director.seed, 23) - 0.5;
+        s.director.seed = s.director.seed.wrapping_add(1);
+        let mag = tick.drop_trigger * amt * 1.4;
+        s.camera.add_kick([r1 * mag, r2 * mag, 0.0]);
+    }
+    s.camera.apply_kick_spring(dt);
+    s.camera.roll = s.director.roll_phase.sin() * scaled_swell * 0.035;
+
+    // ---- save user bases, apply director modulation ----
+    let base_intensity = s.post.intensity;
+    let base_aberration = s.post.aberration;
+    let base_contrast = s.post.contrast;
+    let base_saturation = s.post.saturation;
+    let base_tunnel_glow = s.params.tunnel_glow;
+    let base_cam_zoom = s.params.cam_zoom;
+
+    s.post.intensity = base_intensity + scaled_drop * 0.25 + scaled_swell * 0.08;
+    s.post.aberration = base_aberration + scaled_drop * 0.40;
+    s.post.contrast = base_contrast + scaled_drop * 0.08;
+    s.post.saturation = (base_saturation - s.director.lull * amt * 0.25).max(0.0);
+    s.params.tunnel_glow = (base_tunnel_glow * (1.0 - s.director.lull * amt * 0.65)).max(0.0);
+    // Push-in zoom: multiply the user's base zoom by a swell factor so the
+    // base slider is respected and the director adds a transient push-in.
+    s.params.cam_zoom = (base_cam_zoom * (1.0 - scaled_swell * 0.08)).max(0.10);
+    s.post.time = s.params.time;
+    s.post.resolution = s.params.resolution;
+
+    // Camera basis (must happen after kick + roll, before GPU write).
+    s.params.cam_pos = s.camera.world_pos();
+    let (right, up, fwd) = s.camera.basis();
+    s.params.cam_right = right;
+    s.params.cam_up = up;
+    s.params.cam_fwd = fwd;
+
     s.renderer.write_cloud_params(&s.params);
     s.renderer.write_post_params(&s.post);
 
-    // Restore base values so UI sliders don't drift with director-driven mods.
+    // Restore base values so the UI sliders read the user-set value next
+    // frame instead of the director-modulated one.
     s.post.intensity = base_intensity;
     s.post.aberration = base_aberration;
     s.post.contrast = base_contrast;
     s.post.saturation = base_saturation;
     s.params.tunnel_glow = base_tunnel_glow;
+    s.params.cam_zoom = base_cam_zoom;
 
     let frame = match s.renderer.surface.get_current_texture() {
         Ok(f) => f,

@@ -103,6 +103,8 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
                     ui.add(egui::Slider::new(&mut p.morph_cap, 0.30..=1.6));
                     ui.label("colour variance (per-puff hue spread)");
                     ui.add(egui::Slider::new(&mut p.color_variance, 0.0..=1.5));
+                    ui.label("god ray strength (cloud shadowing during strikes)");
+                    ui.add(egui::Slider::new(&mut p.god_ray_strength, 0.0..=4.0));
                 });
 
                 egui::CollapsingHeader::new("lightning").default_open(true).show(ui, |ui| {
