@@ -1,6 +1,8 @@
 use crate::app::{Camera, Director, DirectorFeel, Lightning, Scene};
+use crate::audio::Audio;
 use crate::palettes::PALETTES;
 use crate::params::{CloudParams, PostParams};
+use std::path::PathBuf;
 
 pub struct UiCtx<'a> {
     pub p: &'a mut CloudParams,
@@ -11,13 +13,21 @@ pub struct UiCtx<'a> {
     pub palette_index: &'a mut usize,
     pub use_palette_accent: &'a mut bool,
     pub scene: &'a mut Scene,
+    pub audio: &'a Audio,
     pub audio_source: &'a str,
+    pub ffmpeg_present: bool,
+    pub bake_fps: &'a mut u32,
+    pub pending_audio_load: &'a mut Option<PathBuf>,
+    pub pending_bake: &'a mut Option<PathBuf>,
+    pub bake_message: &'a Option<String>,
 }
 
 pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
     let UiCtx {
         p, post, lightning, director, camera,
-        palette_index, use_palette_accent, scene, audio_source,
+        palette_index, use_palette_accent, scene,
+        audio, audio_source, ffmpeg_present, bake_fps,
+        pending_audio_load, pending_bake, bake_message,
     } = c;
     egui::SidePanel::right("controls")
         .default_width(330.0)
@@ -37,12 +47,78 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
 
                 egui::CollapsingHeader::new("audio").default_open(true).show(ui, |ui| {
                     ui.label(format!("source: {audio_source}"));
+                    ui.horizontal(|ui| {
+                        if ui.button("Load track…").clicked() {
+                            if let Some(p) = rfd::FileDialog::new()
+                                .add_filter("audio", &["mp3", "wav", "flac", "ogg", "m4a", "aac"])
+                                .pick_file()
+                            {
+                                *pending_audio_load = Some(p);
+                            }
+                        }
+                        if audio.is_file_mode() && ui.button("Use mic / system").clicked() {
+                            // unloading goes back to live capture — we can't
+                            // mutate Audio here (immutable ref); flag and let
+                            // app.rs handle it. (See note below.)
+                            // For simplicity we won't implement this for now;
+                            // user can restart the app.
+                            ui.label("(restart app to switch back)");
+                        }
+                    });
+                    if audio.is_file_mode() {
+                        let pos = audio.position_secs().unwrap_or(0.0);
+                        let dur = audio.duration_secs().unwrap_or(0.0);
+                        let playing = audio.is_playing();
+                        ui.horizontal(|ui| {
+                            if playing {
+                                if ui.button("⏸").clicked() { audio.pause(); }
+                            } else if ui.button("▶").clicked() { audio.play(); }
+                            if ui.button("⏮").clicked() { audio.seek_secs(0.0); }
+                            ui.label(format!("{} / {}", fmt_time(pos), fmt_time(dur)));
+                        });
+                        let mut seek_pos = pos;
+                        let resp = ui.add(egui::Slider::new(&mut seek_pos, 0.0..=dur.max(0.1))
+                            .show_value(false));
+                        if resp.dragged() || resp.changed() {
+                            audio.seek_secs(seek_pos);
+                        }
+                    }
                     bar(ui, "bass", p.bass);
                     bar(ui, "mid", p.mid);
                     bar(ui, "treble", p.treble);
                     bar(ui, "centroid", p.centroid);
                     bar(ui, "rms", p.rms);
                     bar(ui, "punch", p.punch);
+                });
+
+                egui::CollapsingHeader::new("bake video").default_open(true).show(ui, |ui| {
+                    if !ffmpeg_present {
+                        ui.colored_label(egui::Color32::from_rgb(220, 130, 100),
+                            "ffmpeg not found on PATH.");
+                        ui.small("Install ffmpeg (apt/brew/pacman) and restart.");
+                    } else if !audio.is_file_mode() {
+                        ui.small("Load a track first to enable bake.");
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label("fps");
+                            ui.selectable_value(bake_fps, 30, "30");
+                            ui.selectable_value(bake_fps, 60, "60");
+                        });
+                        ui.small(format!("output size = window size: {}×{}",
+                            p.resolution[0] as u32, p.resolution[1] as u32));
+                        if ui.button("Bake to MP4…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_file_name("clouds.mp4")
+                                .add_filter("MP4", &["mp4"])
+                                .save_file()
+                            {
+                                *pending_bake = Some(path);
+                            }
+                        }
+                    }
+                    if let Some(msg) = bake_message {
+                        ui.small(msg);
+                    }
                 });
 
                 egui::CollapsingHeader::new("director").default_open(true).show(ui, |ui| {
@@ -56,6 +132,7 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
                     bar(ui, "swell", director.swell);
                     bar(ui, "drop", director.drop);
                     bar(ui, "lull", director.lull);
+                    bar(ui, "silence", director.silence);
                     let bpm = director.bpm();
                     ui.label(format!(
                         "section: {:?}   bpm: {}",
@@ -206,6 +283,12 @@ pub fn hint_overlay(ctx: &egui::Context) {
                 );
             });
         });
+}
+
+fn fmt_time(t: f32) -> String {
+    let m = (t / 60.0) as u32;
+    let s = (t - (m as f32) * 60.0) as u32;
+    format!("{m}:{s:02}")
 }
 
 fn bar(ui: &mut egui::Ui, label: &str, value: f32) {

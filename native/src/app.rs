@@ -1,5 +1,6 @@
 use crate::{
     audio::{Audio, Features as AudioFeatures},
+    bake::{ffmpeg_available, BakeJob},
     palettes::PALETTES,
     params::{CloudParams, PostParams, BOLT_PATH_LEN},
     renderer::Renderer,
@@ -39,7 +40,124 @@ fn disp_xy(t: f32) -> [f32; 2] {
     [(t * 0.22).sin() * 2.0, (t * 0.175).cos() * 2.0]
 }
 
-fn hash_u32(seed: u32, salt: u32) -> f32 {
+pub fn run_bake_chunk(s: &mut AppState) {
+    // Bake several frames per UI tick so the user isn't waiting at 60fps —
+    // the GPU can usually do this much faster than realtime since we're not
+    // vsync-bound. 8 frames per tick still lets the UI redraw at ~7 Hz.
+    let frames_per_tick = 8u32;
+    let mut finished = false;
+    let mut bake_error: Option<String> = None;
+
+    if let Some(job) = s.bake.as_mut() {
+        for _ in 0..frames_per_tick {
+            if job.done() {
+                finished = true;
+                break;
+            }
+            let t = job.frame_index as f32 / job.fps as f32;
+            let feat = s.audio.features_at_secs(t);
+            match job.step(&s.renderer, feat) {
+                Ok(done) => {
+                    if done {
+                        finished = true;
+                        break;
+                    }
+                }
+                Err(e) => {
+                    bake_error = Some(format!("bake error: {e:#}"));
+                    finished = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if finished {
+        if let Some(job) = s.bake.take() {
+            if let Some(msg) = bake_error {
+                job.abort();
+                s.bake_message = Some(msg);
+            } else {
+                match job.finish() {
+                    Ok(path) => {
+                        s.bake_message = Some(format!("Bake complete: {}", path.display()));
+                        log::info!("bake complete: {}", path.display());
+                    }
+                    Err(e) => {
+                        s.bake_message = Some(format!("ffmpeg failed: {e:#}"));
+                    }
+                }
+            }
+        }
+    }
+
+    // Draw a progress overlay to the swapchain so the user knows something
+    // is happening.
+    let frame = match s.renderer.surface.get_current_texture() {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+    let view = frame.texture.create_view(&Default::default());
+
+    let raw = s.egui_state.take_egui_input(&s.renderer.window);
+    let bake_state = s.bake.as_ref().map(|b| (b.frame_index, b.total_frames, b.output_path.clone()));
+    let full = s.egui_ctx.clone().run(raw, |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Baking music video…");
+            if let Some((done, total, path)) = bake_state.as_ref() {
+                let frac = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
+                ui.add(egui::ProgressBar::new(frac).text(format!("{done} / {total}")));
+                ui.label(format!("→ {}", path.display()));
+                ui.small("Window may feel sluggish; ffmpeg encodes once frames are piped in.");
+            } else {
+                ui.label("Finalising…");
+            }
+        });
+    });
+    s.egui_state
+        .handle_platform_output(&s.renderer.window, full.platform_output);
+    let paint_jobs = s.egui_ctx.tessellate(full.shapes, full.pixels_per_point);
+    let screen_desc = egui_wgpu::ScreenDescriptor {
+        size_in_pixels: [s.renderer.config.width, s.renderer.config.height],
+        pixels_per_point: full.pixels_per_point,
+    };
+    for (id, delta) in &full.textures_delta.set {
+        s.egui_renderer
+            .update_texture(&s.renderer.device, &s.renderer.queue, *id, delta);
+    }
+
+    let mut enc = s.renderer.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("bake-overlay"),
+    });
+    s.egui_renderer
+        .update_buffers(&s.renderer.device, &s.renderer.queue, &mut enc, &paint_jobs, &screen_desc);
+    {
+        let mut rp = enc
+            .begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("bake-overlay-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.03, g: 0.03, b: 0.04, a: 1.0 }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            })
+            .forget_lifetime();
+        s.egui_renderer.render(&mut rp, &paint_jobs, &screen_desc);
+    }
+    s.renderer.queue.submit(Some(enc.finish()));
+    frame.present();
+    for id in &full.textures_delta.free {
+        s.egui_renderer.free_texture(id);
+    }
+}
+
+pub fn hash_u32(seed: u32, salt: u32) -> f32 {
     let mut x = seed.wrapping_mul(0x9E3779B1).wrapping_add(salt.wrapping_mul(0x85EBCA77));
     x ^= x >> 16; x = x.wrapping_mul(0x7FEB352D);
     x ^= x >> 15; x = x.wrapping_mul(0x846CA68B);
@@ -76,7 +194,7 @@ impl Default for Camera {
 }
 
 impl Camera {
-    fn integrate(&mut self, speed: f32, dt: f32) {
+    pub fn integrate(&mut self, speed: f32, dt: f32) {
         self.z += speed * dt;
     }
 
@@ -90,13 +208,13 @@ impl Camera {
         [d[0] * self.sway_amp, d[1] * self.sway_amp, ahead]
     }
 
-    fn smooth_follow(&mut self, dt: f32) {
+    pub fn smooth_follow(&mut self, dt: f32) {
         let alpha = 1.0 - (-dt / self.follow_secs.max(1e-3)).exp();
         self.pos = v_lerp(self.pos, self.target_pos(), alpha);
         self.lookat = v_lerp(self.lookat, self.target_look(), alpha);
     }
 
-    fn apply_kick_spring(&mut self, dt: f32) {
+    pub fn apply_kick_spring(&mut self, dt: f32) {
         // critically-damped spring back to zero offset
         let k = 60.0;
         let c = 14.0;
@@ -107,14 +225,14 @@ impl Camera {
         }
     }
 
-    fn add_kick(&mut self, v: [f32; 3]) {
+    pub fn add_kick(&mut self, v: [f32; 3]) {
         for i in 0..3 {
             self.kick_vel[i] += v[i];
         }
     }
 
     /// Compute right/up/fwd basis with roll. Returns (right, up, fwd).
-    fn basis(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+    pub fn basis(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
         let pos = v_add(self.pos, self.kick_offset);
         let fwd = v_norm(v_sub(self.lookat, pos));
         let world_up = [0.0, 1.0, 0.0];
@@ -128,7 +246,7 @@ impl Camera {
         (right, up, fwd)
     }
 
-    fn world_pos(&self) -> [f32; 3] {
+    pub fn world_pos(&self) -> [f32; 3] {
         v_add(self.pos, self.kick_offset)
     }
 }
@@ -175,6 +293,9 @@ pub struct Director {
     pub swell: f32,
     pub drop: f32,
     pub lull: f32,
+    /// Sustained-silence envelope: rises only after several seconds of
+    /// near-zero RMS. Used to drive the "empty tunnel when no music" look.
+    pub silence: f32,
 
     // section state w/ hysteresis
     pub section: Section,
@@ -201,7 +322,7 @@ impl Default for Director {
             feel: DirectorFeel::Subtle,
             e_short: 0.0, e_long: 0.0, e_very_long: 0.0,
             punch_baseline: 0.0,
-            swell: 0.0, drop: 0.0, lull: 0.0,
+            swell: 0.0, drop: 0.0, lull: 0.0, silence: 0.0,
             section: Section::Cruise,
             section_age: 0.0,
             section_changed_at: 0.0,
@@ -251,6 +372,16 @@ impl Director {
         let lull_raw = (1.0 - self.e_long * 5.0).clamp(0.0, 1.0);
         self.lull += (1.0 - (-dt / 1.0).exp()) * (lull_raw - self.lull);
         self.lull = self.lull.clamp(0.0, 1.0);
+
+        // Silence: requires sustained near-zero RMS to engage. Drives the
+        // "no clouds when no music" effect. Asymmetric attack/release: slow
+        // to engage (so brief quiet passages don't dissolve the scene), fast
+        // to release (clouds reappear as soon as the music kicks back in).
+        let silent = self.e_long < 0.04 && self.e_very_long < 0.05;
+        let silence_target = if silent { 1.0 } else { 0.0 };
+        let silence_tau = if silent { 2.5 } else { 0.6 };
+        self.silence += (1.0 - (-dt / silence_tau).exp()) * (silence_target - self.silence);
+        self.silence = self.silence.clamp(0.0, 1.0);
 
         // Beat-ish onset interval estimate. Each big drop is treated as an
         // onset; we collect a rolling window of inter-onset intervals and use
@@ -341,7 +472,7 @@ impl Default for Lightning {
 }
 
 impl Lightning {
-    fn maybe_trigger(&mut self, punch: f32, dt: f32) -> bool {
+    pub fn maybe_trigger(&mut self, punch: f32, dt: f32) -> bool {
         self.cooldown = (self.cooldown - dt).max(0.0);
         if self.auto && punch > self.threshold && self.cooldown <= 0.0 {
             self.cooldown = self.cooldown_secs;
@@ -353,13 +484,13 @@ impl Lightning {
         }
     }
 
-    fn force_trigger(&mut self) {
+    pub fn force_trigger(&mut self) {
         self.cooldown = self.cooldown_secs;
         self.seed_counter = self.seed_counter.wrapping_add(1);
         self.strength = self.peak_intensity;
     }
 
-    fn decay(&mut self, dt: f32) {
+    pub fn decay(&mut self, dt: f32) {
         if self.strength > 0.0 {
             self.strength *= (-12.0 * dt).exp();
             if self.strength < 0.002 {
@@ -369,7 +500,7 @@ impl Lightning {
     }
 }
 
-fn build_bolt_path(seed: u32, cam_z: f32, cam_x: f32) -> [[f32; 4]; BOLT_PATH_LEN] {
+pub fn build_bolt_path(seed: u32, cam_z: f32, cam_x: f32) -> [[f32; 4]; BOLT_PATH_LEN] {
     let mut path = [[0.0f32; 4]; BOLT_PATH_LEN];
     // Start above & in front of camera; end below & a bit further.
     let ahead = 6.0 + hash_u32(seed, 1) * 5.0;
@@ -419,6 +550,12 @@ pub struct AppState {
     pub use_palette_accent: bool, // when true, palette swap retargets flash colour
     pub show_ui: bool,
     pub scene: Scene,
+    pub ffmpeg_present: bool,
+    pub bake: Option<BakeJob>,
+    pub bake_fps: u32,
+    pub pending_audio_load: Option<std::path::PathBuf>,
+    pub pending_bake: Option<std::path::PathBuf>,
+    pub bake_message: Option<String>,
 }
 
 #[derive(Default)]
@@ -455,6 +592,11 @@ impl ApplicationHandler for App {
         params.set_palette(&PALETTES[0].stops);
         params.flash_color = PALETTES[0].accent;
 
+        let ffmpeg_present = ffmpeg_available();
+        if !ffmpeg_present {
+            log::warn!("ffmpeg not found on PATH — music-video bake will be disabled");
+        }
+
         self.state = Some(AppState {
             renderer, egui_ctx, egui_state, egui_renderer,
             params,
@@ -469,6 +611,12 @@ impl ApplicationHandler for App {
             use_palette_accent: true,
             show_ui: true,
             scene: Scene::Clouds,
+            ffmpeg_present,
+            bake: None,
+            bake_fps: 60,
+            pending_audio_load: None,
+            pending_bake: None,
+            bake_message: None,
         });
     }
 
@@ -478,7 +626,13 @@ impl ApplicationHandler for App {
 
         match &event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::Resized(sz) => s.renderer.resize(sz.width, sz.height),
+            WindowEvent::Resized(sz) => {
+                // Don't recreate render targets mid-bake — the capture texture
+                // is sized to the original target dimensions.
+                if s.bake.is_none() {
+                    s.renderer.resize(sz.width, sz.height);
+                }
+            }
             WindowEvent::RedrawRequested => render_frame(s),
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed && !resp.consumed =>
@@ -538,6 +692,68 @@ fn toggle_fullscreen(s: &AppState) {
 // ---------- frame ----------
 
 fn render_frame(s: &mut AppState) {
+    // Resolve pending file load before anything else (the UI just queues the
+    // path; actually loading happens here on the main thread).
+    if let Some(path) = s.pending_audio_load.take() {
+        match s.audio.load_file(&path) {
+            Ok(()) => {
+                s.audio.play();
+                s.bake_message = None;
+            }
+            Err(e) => {
+                let msg = format!("Failed to load {}: {e:#}", path.display());
+                log::warn!("{msg}");
+                s.bake_message = Some(msg);
+            }
+        }
+    }
+
+    // Resolve pending bake-start request.
+    if let Some(out_path) = s.pending_bake.take() {
+        if let Some(playback) = s.audio.file_playback() {
+            let audio_path = playback.path.clone();
+            let duration = s.audio.duration_secs().unwrap_or(0.0);
+            match BakeJob::start(
+                &s.renderer,
+                &audio_path,
+                out_path,
+                duration,
+                s.bake_fps,
+                &s.params,
+                &s.post,
+                s.director.feel,
+                s.scene,
+                s.palette_index,
+                s.use_palette_accent,
+                s.director.auto_palette,
+            ) {
+                Ok(job) => {
+                    log::info!(
+                        "baking {} frames @ {} fps to {}",
+                        job.total_frames,
+                        job.fps,
+                        job.output_path.display()
+                    );
+                    s.audio.pause();
+                    s.bake_message = None;
+                    s.bake = Some(job);
+                }
+                Err(e) => {
+                    s.bake_message = Some(format!("Bake failed to start: {e:#}"));
+                }
+            }
+        } else {
+            s.bake_message = Some("Load a track first.".to_string());
+        }
+    }
+
+    // If a bake is running, step it (a few frames per UI tick to keep the
+    // window responsive) and short-circuit the normal scene render.
+    if s.bake.is_some() {
+        run_bake_chunk(s);
+        return;
+    }
+
     let now = Instant::now();
     let dt = (now - s.last_frame).as_secs_f32().clamp(1e-4, 0.1);
     s.last_frame = now;
@@ -591,6 +807,10 @@ fn render_frame(s: &mut AppState) {
     let audio_src = s.audio.source_name.clone();
     let prev_palette = s.palette_index;
     let show_ui = s.show_ui;
+    let ffmpeg_present = s.ffmpeg_present;
+    let bake_msg = s.bake_message.clone();
+    let mut pending_audio_load: Option<std::path::PathBuf> = None;
+    let mut pending_bake: Option<std::path::PathBuf> = None;
     let full = s.egui_ctx.clone().run(raw, |ctx| {
         if show_ui {
             ui::build_ctx(ctx, ui::UiCtx {
@@ -602,12 +822,24 @@ fn render_frame(s: &mut AppState) {
                 palette_index: &mut s.palette_index,
                 use_palette_accent: &mut s.use_palette_accent,
                 scene: &mut s.scene,
+                audio: &s.audio,
                 audio_source: &audio_src,
+                ffmpeg_present,
+                bake_fps: &mut s.bake_fps,
+                pending_audio_load: &mut pending_audio_load,
+                pending_bake: &mut pending_bake,
+                bake_message: &bake_msg,
             });
         } else {
             ui::hint_overlay(ctx);
         }
     });
+    if pending_audio_load.is_some() {
+        s.pending_audio_load = pending_audio_load;
+    }
+    if pending_bake.is_some() {
+        s.pending_bake = pending_bake;
+    }
     if s.palette_index != prev_palette {
         s.params.set_palette(&PALETTES[s.palette_index].stops);
         if s.use_palette_accent {
@@ -650,14 +882,22 @@ fn render_frame(s: &mut AppState) {
     let base_saturation = s.post.saturation;
     let base_tunnel_glow = s.params.tunnel_glow;
     let base_cam_zoom = s.params.cam_zoom;
+    let base_density_mul = s.params.density_mul;
 
     s.post.intensity = base_intensity + scaled_drop * 0.25 + scaled_swell * 0.08;
     s.post.aberration = base_aberration + scaled_drop * 0.40;
     s.post.contrast = base_contrast + scaled_drop * 0.08;
     s.post.saturation = (base_saturation - s.director.lull * amt * 0.25).max(0.0);
-    s.params.tunnel_glow = (base_tunnel_glow * (1.0 - s.director.lull * amt * 0.65)).max(0.0);
-    // Push-in zoom: multiply the user's base zoom by a swell factor so the
-    // base slider is respected and the director adds a transient push-in.
+    // Silence fades both the clouds and the end-of-tunnel glow toward zero
+    // so a quiet bridge leaves us in an empty dark tunnel; lull contributes a
+    // milder dim on top. Both knobs are restored at end-of-frame so the UI
+    // sliders show the user's base value.
+    let silence_amt = s.director.silence;
+    s.params.tunnel_glow = (base_tunnel_glow
+        * (1.0 - s.director.lull * amt * 0.30)
+        * (1.0 - silence_amt * 0.95)).max(0.0);
+    s.params.density_mul = base_density_mul * (1.0 - silence_amt * 0.95);
+    // Push-in zoom: multiply the user's base zoom by a swell factor.
     s.params.cam_zoom = (base_cam_zoom * (1.0 - scaled_swell * 0.08)).max(0.10);
     s.post.time = s.params.time;
     s.post.resolution = s.params.resolution;
@@ -680,6 +920,7 @@ fn render_frame(s: &mut AppState) {
     s.post.saturation = base_saturation;
     s.params.tunnel_glow = base_tunnel_glow;
     s.params.cam_zoom = base_cam_zoom;
+    s.params.density_mul = base_density_mul;
 
     let frame = match s.renderer.surface.get_current_texture() {
         Ok(f) => f,
