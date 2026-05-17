@@ -173,8 +173,14 @@ pub struct PostParams {
     pub vignette: f32,
 
     pub resolution: [f32; 2],
-    pub fade_in: f32,   // 1.0 = normal; <1 = darken final image (used for bake start-from-black)
-    pub radial_blur: f32, // 0 = none; ~0.04 is a strong "hyperdrive streak" toward centre
+    pub fade_in: f32,        // 1.0 = normal; <1 = darken final image (used for bake start-from-black)
+    pub radial_blur: f32,    // 0 = none; ~0.04 is a strong "hyperdrive streak" toward centre
+
+    // Colour grading additions:
+    pub black_point: f32,          // crushes anything below this to true 0 after tonemap (inky shadows)
+    pub highlight_softness: f32,   // 0..1 — how aggressively peaks desaturate toward white at the tonemap shoulder
+    pub _pad_color0: f32,
+    pub _pad_color1: f32,
 }
 
 impl Default for PostParams {
@@ -183,25 +189,37 @@ impl Default for PostParams {
             threshold: 1.1,
             knee: 0.5,
             intensity: 0.38,
-            exposure: 1.0,
+            // Bumped from 1.0 → 1.5 so HDR values actually reach the new
+            // tonemap shoulder (where the creamy roll-off happens).
+            exposure: 1.5,
 
-            contrast: 1.08,
-            saturation: 1.05,
-            // Grain off by default — looked dated; users who want it can dial
-            // it back up in the cinematic panel.
+            // Contrast is now 1.0 by default — the chroma-preserving tonemap
+            // gives the image a natural S-shape, so adding linear contrast
+            // on top just crushed things. User can dial back in if wanted.
+            contrast: 1.0,
+            // Selective saturation only fires in midtones, so we can push
+            // this higher without nuking shadow noise / highlight detail.
+            saturation: 1.30,
             grain: 0.0,
             time: 0.0,
 
-            // Strong baseline aberration: gives the lens a permanent "fringe"
-            // and the director adds another big chunk on drops + bass.
             aberration: 0.6,
             letterbox_aspect: 0.0,
             anamorphic: 0.25,
-            vignette: 0.0, // applied in scene shader; this is a post add-on if wanted
+            vignette: 0.0,
 
             resolution: [1.0, 1.0],
             fade_in: 1.0,
             radial_blur: 0.0,
+
+            // Inky shadows: anything below this becomes 0 in LDR.
+            black_point: 0.045,
+            // 0 = peaks stay fully saturated (often blow ugly), 1 = peaks
+            // desaturate to pure white at the shoulder. 0.55 gives film-like
+            // creamy highlights without losing hue on saturated peaks.
+            highlight_softness: 0.55,
+            _pad_color0: 0.0,
+            _pad_color1: 0.0,
         }
     }
 }

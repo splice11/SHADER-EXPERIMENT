@@ -21,6 +21,11 @@ struct PostParams {
     resolution: vec2<f32>,
     fade_in: f32,
     radial_blur: f32,
+
+    black_point: f32,
+    highlight_softness: f32,
+    _pad_color0: f32,
+    _pad_color1: f32,
 };
 
 @group(0) @binding(0) var scene_tex: texture_2d<f32>;
@@ -44,10 +49,55 @@ fn vs_fullscreen(@builtin(vertex_index) vid: u32) -> VsOut {
     return out;
 }
 
-fn aces(x: vec3<f32>) -> vec3<f32> {
+// Standard ACES rational approximation. Applied per-channel it preserves
+// nothing about chrominance — bright reds rendered with it desaturate fast
+// because the red channel hits 1.0 while green/blue are still climbing.
+fn aces_per_channel(x: vec3<f32>) -> vec3<f32> {
     let a = 2.51; let b = 0.03; let c = 2.43; let d = 0.59; let e = 0.14;
     return clamp((x * (a * x + b)) / (x * (c * x + d) + e),
                  vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Same curve applied to luminance only. Chrominance is preserved (the colour
+// stays exactly as saturated as it was) but values above ~1.0 stack onto a
+// luminance ceiling of 1.0 — i.e. saturated peaks read as "hot colour" rather
+// than "blown white" but can't exceed sRGB gamut.
+fn tonemap_luma_preserving(c: vec3<f32>) -> vec3<f32> {
+    let a = 2.51; let b = 0.03; let cc = 2.43; let d = 0.59; let e = 0.14;
+    let l = max(dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)), 1e-6);
+    let l_tm = clamp((l * (a * l + b)) / (l * (cc * l + d) + e), 0.0, 1.0);
+    return clamp(c * (l_tm / l), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Blend the two tonemaps: at moderate input keep colour saturated (luma
+// variant), at very high input lean on per-channel so blown highlights
+// desaturate cleanly toward white instead of staying neon-saturated. Reads
+// as filmic highlight roll-off without the standard "everything becomes
+// white" ACES failure mode on saturated peaks.
+fn tonemap(c: vec3<f32>, softness: f32) -> vec3<f32> {
+    let luma_pres = tonemap_luma_preserving(c);
+    let per_ch = aces_per_channel(c);
+    let peak = max(c.r, max(c.g, c.b));
+    let weight = smoothstep(0.8, 2.5, peak) * clamp(softness, 0.0, 1.0);
+    return mix(luma_pres, per_ch, weight);
+}
+
+// Inky-blacks shadow crush. Everything below `black_point` becomes literally
+// zero; values above it are remapped to [0, 1] linearly so we don't lose
+// midtones. Applied after tonemap so it works in display-referred space.
+fn shadow_crush(c: vec3<f32>, black_point: f32) -> vec3<f32> {
+    let bp = clamp(black_point, 0.0, 0.4);
+    return max((c - vec3<f32>(bp)) / max(1.0 - bp, 1e-4), vec3<f32>(0.0));
+}
+
+// Selective saturation: bell curve peaked at mid-luma, zero at the extremes.
+// Pushing saturation here makes mids pop without amplifying shadow noise or
+// destroying highlight detail. `amount > 1` saturates mids; `< 1` desaturates.
+fn selective_saturation(c: vec3<f32>, amount: f32) -> vec3<f32> {
+    let l = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+    let bell = 4.0 * l * (1.0 - l); // peak 1.0 at l=0.5, zero at 0 and 1
+    let strength = 1.0 + (amount - 1.0) * bell;
+    return mix(vec3<f32>(l), c, strength);
 }
 
 fn hash21(p: vec2<f32>) -> f32 {
@@ -130,18 +180,24 @@ fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
     let scn = sample_scene_radial(uv);
     let blm = sample_bloom_anamorphic(uv);
 
-    var col = (scn + blm * P.intensity) * P.exposure;
-    col = aces(col);
+    // HDR composite + exposure → tonemap → LDR.
+    var hdr = (scn + blm * P.intensity) * P.exposure;
+    var col = tonemap(hdr, P.highlight_softness);
 
-    // Saturation around luma.
-    let luma = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
-    col = mix(vec3<f32>(luma), col, P.saturation);
-    // Contrast around mid-grey.
+    // Inky-black crush (LDR).
+    col = shadow_crush(col, P.black_point);
+
+    // Saturation only fires in midtones, so heavy boost here doesn't trash
+    // shadow noise or highlight detail.
+    col = selective_saturation(col, P.saturation);
+
+    // Linear contrast about mid-grey, kept gentle since tonemap already
+    // contributes the curve's shape.
     col = (col - vec3<f32>(0.5)) * P.contrast + vec3<f32>(0.5);
     col = clamp(col, vec3<f32>(0.0), vec3<f32>(1.0));
 
-    // Animated film grain. Scale by 1/luma a bit so it shows in the dark areas
-    // more than in highlights — that's how real film stock looks.
+    // Final luma used for grain weighting.
+    let luma = dot(col, vec3<f32>(0.2126, 0.7152, 0.0722));
     if (P.grain > 0.0001) {
         let g = (hash21(uv * P.resolution + vec2<f32>(P.time * 137.31, P.time * 91.7)) - 0.5);
         let scale = mix(1.4, 0.6, smoothstep(0.0, 0.7, luma));
