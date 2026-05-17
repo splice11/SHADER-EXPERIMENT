@@ -62,14 +62,27 @@ pub struct BakeJob {
     next_beat_idx: usize,
     next_phrase_idx: usize,
 
-    // HUD overlay: dedicated egui context driven with synthetic input. Renders
-    // a small info panel (track title, BPM, current beat / phrase, palette,
-    // elapsed time) onto the captured frame after the composite pass.
+    // HUD overlay: dedicated egui context driven with synthetic input. The
+    // HUD is rendered into its own texture (hud_target) then a final embed
+    // pass blends it onto the composited scene with alpha modulated by
+    // per-pixel scene brightness — bright clouds occlude the text so it
+    // reads as embedded in the visual rather than floating on top.
     pub show_hud: bool,
     track_title: String,
     hud_ctx: egui::Context,
     hud_renderer: egui_wgpu::Renderer,
     hud_pixels_per_point: f32,
+
+    // Intermediate scene-only target the composite writes into when HUD is
+    // enabled; the embed pass reads this + hud_target and writes the final
+    // result to capture_view.
+    scene_pre_hud_tex: wgpu::Texture,
+    scene_pre_hud_view: wgpu::TextureView,
+    hud_tex: wgpu::Texture,
+    hud_view: wgpu::TextureView,
+    embed_pipeline: wgpu::RenderPipeline,
+    embed_bind_group: wgpu::BindGroup,
+    _embed_sampler: wgpu::Sampler,
 }
 
 /// Length of the start-from-black fade at the head of every bake. Anything
@@ -192,14 +205,133 @@ impl BakeJob {
             .unwrap_or("track")
             .to_string();
         let hud_ctx = egui::Context::default();
+        // The HUD target is a transparent RGBA8 surface that egui blends
+        // into. We pick a sRGB-suffixed format matching the bake's output
+        // colour space so colours match through the embed pass.
+        let hud_format = renderer.config.format;
         let hud_renderer = egui_wgpu::Renderer::new(
             &renderer.device,
-            renderer.config.format,
+            hud_format,
             None,
             1,
             false,
         );
         let hud_pixels_per_point = (height as f32 / 1080.0).clamp(1.0, 3.0);
+
+        // Intermediate scene buffer (composite writes here) and HUD buffer
+        // (egui writes here). Embed pass reads both and writes capture_view.
+        let make_tex = |label: &str| -> wgpu::Texture {
+            renderer.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: hud_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            })
+        };
+        let scene_pre_hud_tex = make_tex("bake-scene-pre-hud");
+        let scene_pre_hud_view = scene_pre_hud_tex.create_view(&Default::default());
+        let hud_tex = make_tex("bake-hud-overlay");
+        let hud_view = hud_tex.create_view(&Default::default());
+
+        let embed_sampler = renderer.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("bake-hud-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let embed_bgl = renderer.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bake-hud-embed-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let embed_bind_group = renderer.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("bake-hud-embed-bg"),
+            layout: &embed_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&scene_pre_hud_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&embed_sampler) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&hud_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&embed_sampler) },
+            ],
+        });
+        let embed_shader = renderer.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("hud_embed.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/hud_embed.wgsl").into()),
+        });
+        let embed_layout = renderer.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("bake-hud-embed-pl"),
+            bind_group_layouts: &[&embed_bgl],
+            push_constant_ranges: &[],
+        });
+        let embed_pipeline = renderer.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("bake-hud-embed-pipeline"),
+            layout: Some(&embed_layout),
+            vertex: wgpu::VertexState {
+                module: &embed_shader,
+                entry_point: "vs_embed",
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &embed_shader,
+                entry_point: "fs_embed",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: renderer.config.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
 
         Ok(Self {
             frame_index: 0,
@@ -233,6 +365,13 @@ impl BakeJob {
             hud_ctx,
             hud_renderer,
             hud_pixels_per_point,
+            scene_pre_hud_tex,
+            scene_pre_hud_view,
+            hud_tex,
+            hud_view,
+            embed_pipeline,
+            embed_bind_group,
+            _embed_sampler: embed_sampler,
         })
     }
 
@@ -339,29 +478,27 @@ impl BakeJob {
     }
 
     /// Render and pipe one frame. Returns Ok(true) when the bake just finished.
-    /// Render the in-frame info overlay onto `capture_view`. Cheap — egui
-    /// tessellation + a single textured draw — but runs after the composite
-    /// pass so the text lives on top of all post-processing.
+    /// Render the in-frame info overlay into `hud_view` (cleared transparent
+    /// every frame). The downstream embed pass occludes this layer per-pixel
+    /// against the scene's luma so the HUD reads as embedded behind clouds.
     fn render_hud(
         &mut self,
         renderer: &Renderer,
         enc: &mut wgpu::CommandEncoder,
         t: f32,
     ) {
-        // Pre-compute everything the closure reads so we don't borrow self
-        // mutably and immutably at the same time.
-        let title = self.track_title.clone();
+        // Pre-extract anything the egui closure needs so we don't double-borrow self.
+        let title = self.track_title.to_uppercase();
         let bpm = self.cues.bpm;
         let confident_grid = !self.cues.beats.is_empty()
             && self.cues.beat_confidence > 0.2;
         let beat_idx = if confident_grid { self.next_beat_idx } else { 0 };
-        let phrase_idx = self.next_phrase_idx;
+        let beat_total = self.cues.beats.len().max(beat_idx);
         let drops_seen = self.next_drop_idx;
-        let palette_name = PALETTES[self.palette_index].name.to_string();
-        let section = format!("{:?}", self.director.section).to_lowercase();
+        let drops_total = self.cues.drops.len();
+        let palette_name = PALETTES[self.palette_index].name.to_uppercase();
         let elapsed = t;
         let total = self.total_frames as f32 / self.fps as f32;
-        let pct = (self.frame_index as f32 / self.total_frames.max(1) as f32) * 100.0;
         let ppp = self.hud_pixels_per_point;
         let logical_w = self.width as f32 / ppp;
         let logical_h = self.height as f32 / ppp;
@@ -379,83 +516,47 @@ impl BakeJob {
 
         let ctx = self.hud_ctx.clone();
         let full = ctx.run(raw_input, |ctx| {
-            let panel_fill = egui::Color32::from_black_alpha(150);
-            let stroke = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(40));
-            let main_color = egui::Color32::from_white_alpha(230);
-            let dim_color = egui::Color32::from_white_alpha(150);
-
-            // Bottom-left: track title + BPM + structural counters.
-            egui::Area::new("hud-left".into())
-                .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(28.0, -28.0))
+            // Single panel bottom-left, mono, no fill (the embed pass takes
+            // care of contrast against the background).
+            egui::Area::new("hud".into())
+                .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(34.0, -28.0))
                 .interactable(false)
                 .show(ctx, |ui| {
-                    egui::Frame::none()
-                        .fill(panel_fill)
-                        .stroke(stroke)
-                        .inner_margin(egui::Margin::symmetric(14.0, 10.0))
-                        .rounding(8.0)
-                        .show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new(&title)
-                                    .color(main_color)
-                                    .size(18.0)
-                                    .strong(),
-                            );
-                            ui.add_space(2.0);
-                            let bpm_str = if bpm > 30.0 {
-                                format!("{:.0} BPM", bpm)
-                            } else {
-                                "— BPM".to_string()
-                            };
-                            ui.label(
-                                egui::RichText::new(format!("{bpm_str}   ·   {section}"))
-                                    .color(dim_color)
-                                    .size(12.0)
-                                    .monospace(),
-                            );
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "beat {:<5}  phrase {:<3}  drops {}",
-                                    beat_idx, phrase_idx, drops_seen,
-                                ))
-                                .color(dim_color)
-                                .size(12.0)
-                                .monospace(),
-                            );
-                        });
-                });
-
-            // Top-right: palette + elapsed / total + progress %.
-            egui::Area::new("hud-right".into())
-                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-28.0, 28.0))
-                .interactable(false)
-                .show(ctx, |ui| {
-                    egui::Frame::none()
-                        .fill(panel_fill)
-                        .stroke(stroke)
-                        .inner_margin(egui::Margin::symmetric(14.0, 10.0))
-                        .rounding(8.0)
-                        .show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new(&palette_name)
-                                    .color(main_color)
-                                    .size(14.0)
-                                    .strong(),
-                            );
-                            ui.add_space(2.0);
-                            let e_m = (elapsed as u32) / 60;
-                            let e_s = (elapsed as u32) % 60;
-                            let t_m = (total as u32) / 60;
-                            let t_s = (total as u32) % 60;
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{e_m}:{e_s:02} / {t_m}:{t_s:02}    {pct:>4.0}%"
-                                ))
-                                .color(dim_color)
-                                .size(12.0)
-                                .monospace(),
-                            );
-                        });
+                    let title_color = egui::Color32::from_white_alpha(225);
+                    let body_color  = egui::Color32::from_white_alpha(170);
+                    let bpm_str = if bpm > 30.0 {
+                        format!("{:>3.0}", bpm)
+                    } else {
+                        " --".to_string()
+                    };
+                    let e_m = (elapsed as u32) / 60;
+                    let e_s = (elapsed as u32) % 60;
+                    let t_m = (total as u32) / 60;
+                    let t_s = (total as u32) % 60;
+                    ui.label(
+                        egui::RichText::new(&title)
+                            .color(title_color)
+                            .monospace()
+                            .size(13.0)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{bpm_str}   {e_m}:{e_s:02}/{t_m}:{t_s:02}",
+                        ))
+                        .color(body_color)
+                        .monospace()
+                        .size(11.0),
+                    );
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{:>4}/{:<4}  {}/{}  {}",
+                            beat_idx, beat_total, drops_seen, drops_total, palette_name,
+                        ))
+                        .color(body_color)
+                        .monospace()
+                        .size(11.0),
+                    );
                 });
         });
 
@@ -480,10 +581,13 @@ impl BakeJob {
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("bake-hud"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.capture_view,
+                        view: &self.hud_view,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
+                            // Clear hud target each frame — egui only redraws
+                            // the area its layout occupies, so leftover pixels
+                            // from earlier frames would ghost the text.
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
@@ -762,12 +866,20 @@ impl BakeJob {
             rp.set_bind_group(0, &renderer.targets.bloom_bind_groups[i + 1], &[]);
             rp.draw(0..3, 0..1);
         }
-        // Composite → capture texture
+        // Composite target depends on whether the HUD path is engaged: when
+        // it is, composite writes to the intermediate, the HUD egui pass
+        // writes to its own texture, and the embed pass produces the final
+        // capture_view. When show_hud is off we skip the indirection.
+        let composite_target = if self.show_hud {
+            &self.scene_pre_hud_view
+        } else {
+            &self.capture_view
+        };
         {
             let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bake-composite"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.capture_view,
+                    view: composite_target,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
@@ -782,9 +894,29 @@ impl BakeJob {
             rp.set_bind_group(0, &renderer.targets.composite_bind_group, &[]);
             rp.draw(0..3, 0..1);
         }
-        // Optional HUD overlay → loaded on top of capture_view
         if self.show_hud {
+            // 1. render egui HUD into hud_view (cleared transparent so the
+            //    embed pass can read straight-through alpha).
             self.render_hud(renderer, &mut enc, t);
+            // 2. embed pass: combines scene_pre_hud + hud → capture_view,
+            //    with per-pixel HUD visibility modulated by scene luma.
+            let mut rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("bake-hud-embed"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.capture_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.embed_pipeline);
+            rp.set_bind_group(0, &self.embed_bind_group, &[]);
+            rp.draw(0..3, 0..1);
         }
         // Texture → staging buffer
         enc.copy_texture_to_buffer(
