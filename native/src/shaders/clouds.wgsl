@@ -39,8 +39,8 @@ struct Params {
     color_variance: f32,
     bolt_saturation: f32,
 
-    god_ray_strength: f32,
-    _pad_extra0: f32,
+    quality_steps: f32,
+    quality_step_floor: f32,
     _pad_extra1: f32,
     _pad_extra2: f32,
 };
@@ -130,44 +130,6 @@ fn bolt_dist3(pos: vec3<f32>) -> f32 {
     return d;
 }
 
-// Closest point on the bolt polyline to `p`. Used as the per-sample "light
-// source" for the god-ray shadow march.
-fn nearest_bolt_point(p: vec3<f32>) -> vec3<f32> {
-    let n = i32(P.bolt_count);
-    if (n < 2) { return p; }
-    var nearest = p;
-    var best = 1.0e9;
-    let last = min(n - 1, 7);
-    for (var i = 0; i < 7; i = i + 1) {
-        if (i >= last) { break; }
-        let a = P.bolt_path[i].xyz;
-        let b = P.bolt_path[i + 1].xyz;
-        let pa = p - a;
-        let ba = b - a;
-        let t = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
-        let cp = a + ba * t;
-        let dv = p - cp;
-        let d2 = dot(dv, dv);
-        if (d2 < best) { best = d2; nearest = cp; }
-    }
-    return nearest;
-}
-
-// Integrate density along the segment from `start` to `end` to get optical
-// depth — used to attenuate light coming from the bolt through the cloud.
-// 2 samples is enough at the scales we're working with (the cloud is blobby,
-// so finer shadow sampling buys very little visual gain for 2x cost).
-fn shadow_march(start: vec3<f32>, end: vec3<f32>, prm1: f32, itime: f32) -> f32 {
-    let dir = end - start;
-    let dist = length(dir);
-    if (dist < 0.01) { return 0.0; }
-    let s1 = start + dir * 0.33;
-    let s2 = start + dir * 0.66;
-    let d1 = max(map_fn(s1, prm1, itime).x - 0.3, 0.0);
-    let d2 = max(map_fn(s2, prm1, itime).x - 0.3, 0.0);
-    return (d1 + d2) * dist * 0.33;
-}
-
 fn saturate_color(c: vec3<f32>, sat: f32) -> vec3<f32> {
     let lum = dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
     return max(mix(vec3<f32>(lum), c, sat), vec3<f32>(0.0));
@@ -192,9 +154,13 @@ fn render_clouds(
                               clamp(P.palette_amount, 0.0, 1.0));
     let tunnel_col = tunnel_col_base * P.tunnel_glow;
 
-    // 160 steps with a tighter floor on the per-step distance — more wisp
-    // detail in dense regions for ~25% more cost.
-    for (var i = 0; i < 160; i = i + 1) {
+    // Loop bounds and per-step floor are CPU-driven: the live app keeps them
+    // modest (~140 / 0.085), the bake job bumps them so the recorded video
+    // gets crisp wisps at 1440p+. Hard cap 320 to keep a worst-case ceiling.
+    let max_steps = i32(clamp(P.quality_steps, 24.0, 320.0));
+    let step_floor = clamp(P.quality_step_floor, 0.03, 0.30);
+    for (var i = 0; i < 320; i = i + 1) {
+        if (i >= max_steps) { break; }
         if (rez.a > 0.99) { break; }
         let pos = ro + t * rd;
         let mpv = map_fn(pos, prm1, itime);
@@ -230,27 +196,17 @@ fn render_clouds(
             col = vec4<f32>(col.xyz * den * shade, col.a);
         }
 
-        // 3D bolt: emissive accumulation. The core is unattenuated emission
-        // (the visible bolt). The "scatter" term is in-scattering from the
-        // bolt into the cloud — for that, we need to know how much cloud sits
-        // between this sample and the bolt, which is the god-ray effect.
+        // 3D bolt: cheap emissive accumulation. Core is the visible filament;
+        // glow is a soft radial falloff into the surrounding cloud. The old
+        // shadow-march "god rays" path was expensive and didn't read well on
+        // most strikes, so it's been removed.
         if (flash_on) {
             let bd = bolt_dist3(pos);
             let core = exp(-bd / max(P.bolt_width, 1e-4));
-            var scatter = vec3<f32>(0.0);
-            // Strict culling: only do the shadow march on real cloud samples
-            // close to the bolt. Most strike-frame perf was lost to thin /
-            // distant samples that contributed almost nothing visually.
-            if (den > 0.12 && bd < 14.0) {
-                let nearest = nearest_bolt_point(pos);
-                let od = shadow_march(pos, nearest, prm1, itime);
-                let transmittance = exp(-od * max(P.god_ray_strength, 0.0));
-                let glow = exp(-bd * 0.55) * transmittance;
-                scatter = P.flash_color * P.flash_strength
-                    * glow * P.bolt_glow * den * 1.6;
-            }
-            let core_emit = P.flash_color * P.flash_strength * core * P.bolt_intensity;
-            let tinted = saturate_color(core_emit + scatter, P.bolt_saturation);
+            let glow = exp(-bd * 0.55) * clamp(den * 1.6, 0.0, 1.0);
+            let emit = P.flash_color * P.flash_strength
+                * (core * P.bolt_intensity + glow * P.bolt_glow);
+            let tinted = saturate_color(emit, P.bolt_saturation);
             col = vec4<f32>(col.rgb + tinted, max(col.a, core * 0.1));
         }
 
@@ -258,7 +214,7 @@ fn render_clouds(
         col = col + vec4<f32>(tunnel_col, 0.1) * clamp(fog_c - fog_t, 0.0, 1.0);
         fog_t = fog_c;
         rez = rez + col * (1.0 - rez.a);
-        t = t + clamp(0.5 - dn * dn * 0.05, 0.07, 0.28);
+        t = t + clamp(0.5 - dn * dn * 0.05, step_floor, 0.28);
     }
     return clamp(rez, vec4<f32>(0.0), vec4<f32>(8.0));
 }
@@ -320,6 +276,22 @@ fn fs_clouds(in: VsOut) -> @location(0) vec4<f32> {
 
     let ro = P.cam_pos;
     let rd = normalize(p.x * P.cam_right + p.y * P.cam_up + P.cam_fwd);
+
+    // Silence / empty-tunnel fast path: when the director has faded the cloud
+    // density to almost nothing, the volume march is doing 160+ wasted samples
+    // that all contribute zero — that was the "performance tanks to 10 fps"
+    // case. Synthesize the cheap end-of-tunnel glow instead.
+    if (density_boost < 0.04) {
+        let palette_mid = mix(P.palette1, P.palette3, 0.55);
+        let tunnel_col_base = mix(vec3<f32>(0.06, 0.11, 0.11),
+                                  palette_mid * 0.35,
+                                  clamp(P.palette_amount, 0.0, 1.0));
+        var col_empty = tunnel_col_base * P.tunnel_glow * 0.6;
+        let v0 = clamp(P.vignette, 0.0, 1.0);
+        let vfac0 = pow(16.0 * q.x * q.y * (1.0 - q.x) * (1.0 - q.y), 0.12);
+        col_empty = col_empty * mix(vec3<f32>(1.0), vec3<f32>(vfac0), v0);
+        return vec4<f32>(col_empty, 1.0);
+    }
 
     let scn = render_clouds(ro, rd, prm1, itime, density_boost);
     var col = scn.rgb;

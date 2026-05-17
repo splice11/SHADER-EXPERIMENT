@@ -19,7 +19,7 @@ struct PostParams {
     vignette: f32,
 
     resolution: vec2<f32>,
-    _pad0: f32,
+    fade_in: f32,
     _pad1: f32,
 };
 
@@ -121,5 +121,6 @@ fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
         col = col + vec3<f32>(g) * P.grain * scale;
     }
 
-    return vec4<f32>(clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
+    let final_col = clamp(col, vec3<f32>(0.0), vec3<f32>(1.0)) * clamp(P.fade_in, 0.0, 1.0);
+    return vec4<f32>(final_col, 1.0);
 }

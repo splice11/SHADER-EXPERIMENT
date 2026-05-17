@@ -39,8 +39,8 @@ struct Params {
     color_variance: f32,
     bolt_saturation: f32,
 
-    god_ray_strength: f32,
-    _pad_extra0: f32,
+    quality_steps: f32,
+    quality_step_floor: f32,
     _pad_extra1: f32,
     _pad_extra2: f32,
 };

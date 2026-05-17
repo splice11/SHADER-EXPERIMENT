@@ -3,7 +3,7 @@
 // output to a capture texture, copies it to a staging buffer, and pipes the
 // bytes into a spawned ffmpeg process that muxes in the source mp3.
 
-use crate::app::{build_bolt_path, hash_u32, Camera, Director, Lightning, Scene};
+use crate::app::{build_bolt_path, hash_u32, Camera, Director, Lightning, PaletteCrossfade, Scene};
 use crate::audio::Features;
 use crate::palettes::PALETTES;
 use crate::params::{CloudParams, PostParams, BOLT_PATH_LEN};
@@ -50,7 +50,12 @@ pub struct BakeJob {
     pub palette_index: usize,
     pub scene: Scene,
     pub use_palette_accent: bool,
+    pub palette_crossfade: PaletteCrossfade,
 }
+
+/// Length of the start-from-black fade at the head of every bake. Anything
+/// past this and the composite shader passes through unchanged.
+const BAKE_FADE_IN_SECS: f32 = 1.4;
 
 impl BakeJob {
     pub fn start(
@@ -101,6 +106,10 @@ impl BakeJob {
             mapped_at_creation: false,
         });
 
+        // ffmpeg encode settings: `-preset veryfast` roughly halves encode CPU
+        // time vs `fast` for ~1-2 % bigger files at the same CRF, which is the
+        // best trade for "I want my render done" workflows. `-threads 0` lets
+        // libx264 use every core. CRF 18 keeps clouds visually lossless.
         let mut cmd = Command::new("ffmpeg");
         cmd.args([
             "-y",
@@ -115,7 +124,9 @@ impl BakeJob {
             "-map", "0:v",
             "-map", "1:a",
             "-c:v", "libx264",
-            "-preset", "fast",
+            "-preset", "veryfast",
+            "-tune", "film",
+            "-threads", "0",
             "-crf", "18",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
@@ -142,6 +153,11 @@ impl BakeJob {
             params.flash_color = PALETTES[palette_index].accent;
         }
         params.resolution = [width as f32, height as f32];
+        // Render-only quality bump: more loop iterations + a smaller per-step
+        // floor produce noticeably crisper wisps at 1440p / 2160p. ~70% extra
+        // shader cost, but the bake doesn't need to hit interactive frame rate.
+        params.quality_steps = 240.0;
+        params.quality_step_floor = 0.055;
 
         Ok(Self {
             frame_index: 0,
@@ -164,6 +180,7 @@ impl BakeJob {
             palette_index,
             scene,
             use_palette_accent,
+            palette_crossfade: PaletteCrossfade::default(),
         })
     }
 
@@ -206,13 +223,18 @@ impl BakeJob {
             && tick.section_changed
             && self.director.palette_cooldown > 6.0
         {
+            self.palette_crossfade.start(&self.params);
             self.palette_index = (self.palette_index + 1) % PALETTES.len();
-            self.params.set_palette(&PALETTES[self.palette_index].stops);
-            if self.use_palette_accent {
-                self.params.flash_color = PALETTES[self.palette_index].accent;
-            }
             self.director.palette_cooldown = 0.0;
         }
+        let target_pal = PALETTES[self.palette_index];
+        self.palette_crossfade.step(
+            &mut self.params,
+            &target_pal.stops,
+            target_pal.accent,
+            self.use_palette_accent,
+            frame_dt,
+        );
 
         // Lightning trigger (deterministic — uses self.lightning seed).
         if self.lightning.maybe_trigger(features.punch, frame_dt) {
@@ -264,8 +286,13 @@ impl BakeJob {
             * (1.0 - silence * 0.95))
             .max(0.0);
         self.params.density_mul = base_density_mul * (1.0 - silence * 0.95);
+        // Pull-back zoom on swell/drop (mirrors the live path).
         self.params.cam_zoom =
-            (base_cam_zoom * (1.0 - scaled_swell * 0.08)).max(0.10);
+            base_cam_zoom * (1.0 + scaled_swell * 0.22 + scaled_drop * 0.08);
+        // Start the video from black: ramp fade_in from 0 → 1 over the first
+        // BAKE_FADE_IN_SECS seconds so the simulation isn't visibly mid-stride
+        // when the music kicks in.
+        self.post.fade_in = (t / BAKE_FADE_IN_SECS).clamp(0.0, 1.0);
         self.post.time = self.params.time;
         self.post.resolution = self.params.resolution;
 
@@ -287,6 +314,8 @@ impl BakeJob {
         self.params.tunnel_glow = base_tunnel_glow;
         self.params.cam_zoom = base_cam_zoom;
         self.params.density_mul = base_density_mul;
+        // Note: we intentionally don't restore post.fade_in — it's a derived
+        // bake-only knob the live UI never reads.
 
         // ---- render passes ----
         let mut enc = renderer

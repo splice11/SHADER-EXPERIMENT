@@ -89,6 +89,11 @@ pub fn run_bake_chunk(s: &mut AppState) {
                 }
             }
         }
+        // Restore the live render targets to the actual window size — the
+        // bake may have temporarily resized them up to 4K.
+        if let Some((w, h)) = s.pre_bake_window_size.take() {
+            s.renderer.resize(w, h);
+        }
     }
 
     // Draw a progress overlay to the swapchain so the user knows something
@@ -525,12 +530,108 @@ pub fn build_bolt_path(seed: u32, cam_z: f32, cam_x: f32) -> [[f32; 4]; BOLT_PAT
     path
 }
 
+// ---------- palette crossfade ----------
+
+/// Holds the "from" snapshot of a palette swap so the live + bake paths can
+/// smoothly lerp into a new palette over a couple of seconds instead of
+/// snapping. `t` advances from 0 → 1 at rate dt / duration.
+#[derive(Copy, Clone)]
+pub struct PaletteCrossfade {
+    pub from_stops: [[f32; 3]; 5],
+    pub from_accent: [f32; 3],
+    pub t: f32,
+    pub duration: f32,
+}
+
+impl Default for PaletteCrossfade {
+    fn default() -> Self {
+        Self {
+            from_stops: [[0.0; 3]; 5],
+            from_accent: [0.0; 3],
+            t: 1.0, // start "done" — no blend in progress
+            duration: 2.0,
+        }
+    }
+}
+
+impl PaletteCrossfade {
+    /// Snapshot the current palette as "from" and reset the blend so the
+    /// caller can write the destination palette into params over time.
+    pub fn start(&mut self, params: &crate::params::CloudParams) {
+        self.from_stops = [
+            params.palette0, params.palette1, params.palette2,
+            params.palette3, params.palette4,
+        ];
+        self.from_accent = params.flash_color;
+        self.t = 0.0;
+    }
+
+    /// Advance and write the blended palette to `params`. `target` is the
+    /// destination palette stops; `target_accent` only used if `use_accent`.
+    pub fn step(
+        &mut self,
+        params: &mut crate::params::CloudParams,
+        target: &[[f32; 3]; 5],
+        target_accent: [f32; 3],
+        use_accent: bool,
+        dt: f32,
+    ) {
+        if self.t >= 1.0 { return; }
+        self.t = (self.t + dt / self.duration.max(0.05)).min(1.0);
+        // Smoothstep for a gentler transition than linear.
+        let s = self.t * self.t * (3.0 - 2.0 * self.t);
+        let lerp = |a: [f32; 3], b: [f32; 3]| -> [f32; 3] {
+            [a[0] + (b[0]-a[0]) * s, a[1] + (b[1]-a[1]) * s, a[2] + (b[2]-a[2]) * s]
+        };
+        params.palette0 = lerp(self.from_stops[0], target[0]);
+        params.palette1 = lerp(self.from_stops[1], target[1]);
+        params.palette2 = lerp(self.from_stops[2], target[2]);
+        params.palette3 = lerp(self.from_stops[3], target[3]);
+        params.palette4 = lerp(self.from_stops[4], target[4]);
+        if use_accent {
+            params.flash_color = lerp(self.from_accent, target_accent);
+        }
+    }
+}
+
 // ---------- app state ----------
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Scene {
     Clouds,
     Cube,
+}
+
+/// Output resolution selector for the bake job. `Window` reuses the current
+/// window size; the others temporarily resize the render targets so the
+/// recorded video can be sharper than the visible window.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum BakeSize {
+    Window,
+    P1080,
+    P1440,
+    P2160,
+}
+
+impl BakeSize {
+    pub fn label(self) -> &'static str {
+        match self {
+            BakeSize::Window => "window",
+            BakeSize::P1080 => "1080p",
+            BakeSize::P1440 => "1440p",
+            BakeSize::P2160 => "2160p",
+        }
+    }
+    /// Returns (w, h) for the given selector, falling back to `window` when
+    /// `Window` is requested.
+    pub fn dimensions(self, window: (u32, u32)) -> (u32, u32) {
+        match self {
+            BakeSize::Window => window,
+            BakeSize::P1080 => (1920, 1080),
+            BakeSize::P1440 => (2560, 1440),
+            BakeSize::P2160 => (3840, 2160),
+        }
+    }
 }
 
 pub struct AppState {
@@ -553,6 +654,9 @@ pub struct AppState {
     pub ffmpeg_present: bool,
     pub bake: Option<BakeJob>,
     pub bake_fps: u32,
+    pub bake_size: BakeSize,
+    pub pre_bake_window_size: Option<(u32, u32)>,
+    pub palette_crossfade: PaletteCrossfade,
     pub pending_audio_load: Option<std::path::PathBuf>,
     pub pending_bake: Option<std::path::PathBuf>,
     pub bake_message: Option<String>,
@@ -614,6 +718,9 @@ impl ApplicationHandler for App {
             ffmpeg_present,
             bake: None,
             bake_fps: 60,
+            bake_size: BakeSize::Window,
+            pre_bake_window_size: None,
+            palette_crossfade: PaletteCrossfade::default(),
             pending_audio_load: None,
             pending_bake: None,
             bake_message: None,
@@ -713,6 +820,16 @@ fn render_frame(s: &mut AppState) {
         if let Some(playback) = s.audio.file_playback() {
             let audio_path = playback.path.clone();
             let duration = s.audio.duration_secs().unwrap_or(0.0);
+            // Stash the live window resolution and resize render targets to
+            // the chosen bake output. The window itself stays the same; only
+            // the off-screen scene/bloom/composite targets grow.
+            let window_size = (s.renderer.config.width, s.renderer.config.height);
+            let (bw, bh) = s.bake_size.dimensions(window_size);
+            if (bw, bh) != window_size {
+                s.pre_bake_window_size = Some(window_size);
+                s.renderer.resize(bw, bh);
+                s.params.resolution = [bw as f32, bh as f32];
+            }
             match BakeJob::start(
                 &s.renderer,
                 &audio_path,
@@ -740,6 +857,10 @@ fn render_frame(s: &mut AppState) {
                 }
                 Err(e) => {
                     s.bake_message = Some(format!("Bake failed to start: {e:#}"));
+                    // Roll back the resize if the bake never got off the ground.
+                    if let Some((w, h)) = s.pre_bake_window_size.take() {
+                        s.renderer.resize(w, h);
+                    }
                 }
             }
         } else {
@@ -776,15 +897,14 @@ fn render_frame(s: &mut AppState) {
     let scaled_swell = (s.director.swell * amt).clamp(0.0, 1.5);
     let scaled_drop = (s.director.drop * amt).clamp(0.0, 1.5);
 
-    // Optional palette auto-rotation on section changes (beat-aware).
+    // Optional palette auto-rotation on section changes (beat-aware). Instead
+    // of snapping, kick off a smooth crossfade — `palette_crossfade.step()`
+    // below writes blended stops into `params.palette*` every frame until done.
     if s.director.auto_palette && tick.section_changed
         && s.director.palette_cooldown > 6.0
     {
+        s.palette_crossfade.start(&s.params);
         s.palette_index = (s.palette_index + 1) % PALETTES.len();
-        s.params.set_palette(&PALETTES[s.palette_index].stops);
-        if s.use_palette_accent {
-            s.params.flash_color = PALETTES[s.palette_index].accent;
-        }
         s.director.palette_cooldown = 0.0;
     }
 
@@ -826,6 +946,7 @@ fn render_frame(s: &mut AppState) {
                 audio_source: &audio_src,
                 ffmpeg_present,
                 bake_fps: &mut s.bake_fps,
+                bake_size: &mut s.bake_size,
                 pending_audio_load: &mut pending_audio_load,
                 pending_bake: &mut pending_bake,
                 bake_message: &bake_msg,
@@ -841,11 +962,18 @@ fn render_frame(s: &mut AppState) {
         s.pending_bake = pending_bake;
     }
     if s.palette_index != prev_palette {
-        s.params.set_palette(&PALETTES[s.palette_index].stops);
-        if s.use_palette_accent {
-            s.params.flash_color = PALETTES[s.palette_index].accent;
-        }
+        // User-triggered palette change from the dropdown — crossfade too.
+        s.palette_crossfade.start(&s.params);
     }
+    // Drive the active crossfade (no-op once `t >= 1`).
+    let target_pal = PALETTES[s.palette_index];
+    s.palette_crossfade.step(
+        &mut s.params,
+        &target_pal.stops,
+        target_pal.accent,
+        s.use_palette_accent,
+        dt,
+    );
     s.egui_state
         .handle_platform_output(&s.renderer.window, full.platform_output);
 
@@ -897,8 +1025,15 @@ fn render_frame(s: &mut AppState) {
         * (1.0 - s.director.lull * amt * 0.30)
         * (1.0 - silence_amt * 0.95)).max(0.0);
     s.params.density_mul = base_density_mul * (1.0 - silence_amt * 0.95);
-    // Push-in zoom: multiply the user's base zoom by a swell factor.
-    s.params.cam_zoom = (base_cam_zoom * (1.0 - scaled_swell * 0.08)).max(0.10);
+    // Pull-back zoom: swell/drop widen the FOV so peaks feel airy rather than
+    // claustrophobic. (Previously this multiplied < 1.0, which zoomed *in* and
+    // never read as the cam_zoom slider doing anything during peaks.)
+    s.params.cam_zoom = base_cam_zoom * (1.0 + scaled_swell * 0.22 + scaled_drop * 0.08);
+    // Live quality: keep the loop modest so weak GPUs stay above 60 fps. The
+    // bake job overrides these (and grain-free fade-in) for the recorded video.
+    s.params.quality_steps = 140.0;
+    s.params.quality_step_floor = 0.085;
+    s.post.fade_in = 1.0;
     s.post.time = s.params.time;
     s.post.resolution = s.params.resolution;
 
