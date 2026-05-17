@@ -317,14 +317,12 @@ pub struct Director {
     // mimicking the look the user discovered by rapidly nudging the slider.
     pub slingshot: f32,
 
-    // Whip-pan via a critically-damped spring on the roll axis: section
-    // changes inject angular velocity (alternating direction) and the spring
-    // arcs the camera through a long, graceful spin before settling back.
-    // Much less "Minecraft hurt animation" than the old exponential-decay
-    // envelope at the cost of a few rad of accumulated rotation.
-    pub whip_angle: f32,
-    pub whip_velocity: f32,
-    pub whip_dir: f32,
+    // Continuous, never-jerky director rotation. `roll_dir` (-1..1) is the
+    // current rotation direction; `roll_dir_target` is what it crossfades
+    // toward — flipped on phrase boundaries so the camera reverses spin over
+    // ~4 s instead of snapping. Final roll rate = (idle + swell_boost) * dir.
+    pub roll_dir: f32,
+    pub roll_dir_target: f32,
 
     // Occasional backward-motion intent. `reverse_strength` ramps to 1.0 for
     // a few seconds when a section change to Peak coincides with a long-enough
@@ -355,9 +353,8 @@ impl Default for Director {
             auto_palette: false,
             palette_cooldown: 0.0,
             slingshot: 0.0,
-            whip_angle: 0.0,
-            whip_velocity: 0.0,
-            whip_dir: 1.0,
+            roll_dir: 1.0,
+            roll_dir_target: 1.0,
             allow_reverse: false,
             reverse_strength: 0.0,
             reverse_cooldown: 14.0, // start with a head-start so first peak isn't reversed
@@ -466,19 +463,17 @@ impl Director {
         self.slingshot = (self.slingshot - dt * 1.2).max(0.0);
         self.slingshot = self.slingshot.max(drop_trigger * 1.6).min(1.0);
 
-        // Critically-damped spring on the whip-roll angle (omega ~1.4 rad/s,
-        // so the natural period is ~4.5 s and a kick decays smoothly). On
-        // section changes we add ~6 rad/s of angular velocity in the
-        // alternating direction — that integrates into roughly 3-5 rad of
-        // rotation (~170°-290°) before the spring eases it back to zero.
-        let omega = 1.4_f32;
-        let accel = -2.0 * omega * self.whip_velocity - omega * omega * self.whip_angle;
-        self.whip_velocity += accel * dt;
-        self.whip_angle += self.whip_velocity * dt;
+        // Smooth director-driven rotation: flip the *target* direction on
+        // every section change, then exponentially lerp the actual direction
+        // toward it (tau ≈ 4 s). The downstream consumer multiplies a small
+        // idle rate + a swell-driven boost by `roll_dir`, so the camera
+        // always rotates gently and accelerates/reverses across multi-second
+        // crossfades. No snaps, no whip.
         if section_changed {
-            self.whip_velocity += 6.0 * self.whip_dir;
-            self.whip_dir = -self.whip_dir;
+            self.roll_dir_target = -self.roll_dir_target;
         }
+        let dir_alpha = 1.0 - (-dt / 4.0).exp();
+        self.roll_dir += dir_alpha * (self.roll_dir_target - self.roll_dir);
 
         // Reverse: only fires on entry to Peak, with a long cooldown so it
         // stays a "every so often" moment of variety rather than constant.
@@ -1111,9 +1106,17 @@ fn render_frame(s: &mut AppState) {
         s.camera.add_kick([r1 * mag, r2 * mag, 0.0]);
     }
     s.camera.apply_kick_spring(dt);
-    // Roll = slow oscillation (swell-scaled) + sweeping whip-spin angle.
-    s.camera.roll = s.director.roll_phase.sin() * scaled_swell * 0.035
-        + s.director.whip_angle * amt;
+    // Smooth, continuous director rotation. Idle rate is a slow constant the
+    // director always provides so the camera is never frozen; swell adds a
+    // bigger boost when the music gets energetic. Both terms are multiplied
+    // by `roll_dir` which crossfades sign over ~4 s on phrase changes — so
+    // the spin reverses gracefully instead of snapping.
+    let idle_rate = 0.08_f32;             // rad/s baseline (~4.5°/s)
+    let swell_boost = 0.55_f32;           // rad/s at full swell (~31°/s)
+    let roll_rate = (idle_rate + scaled_swell * swell_boost) * s.director.roll_dir * amt;
+    s.camera.roll += roll_rate * dt;
+    // `roll_phase` is still updated by the director for any consumer that
+    // wants a beat-synced phase reference; we no longer derive the roll from it.
 
     // Slow rotation of the cloud-shading light direction. Breaks up the
     // "always bright top-left, always dark bottom-left" pattern Nimitz's
@@ -1125,7 +1128,7 @@ fn render_frame(s: &mut AppState) {
     let base_aberration = s.post.aberration;
     let base_contrast = s.post.contrast;
     let base_saturation = s.post.saturation;
-    let base_lens_warp = s.post.lens_warp;
+    let base_radial_blur = s.post.radial_blur;
     let base_tunnel_glow = s.params.tunnel_glow;
     let base_cam_zoom = s.params.cam_zoom;
     let base_density_mul = s.params.density_mul;
@@ -1137,19 +1140,18 @@ fn render_frame(s: &mut AppState) {
         + s.params.bass * amt * 0.25).clamp(0.0, 1.5);
     s.post.contrast = base_contrast + scaled_drop * 0.08;
     s.post.saturation = (base_saturation - s.director.lull * amt * 0.25).max(0.0);
-    // Lens warp: barrel pulse on drops, smaller bass-driven barrel push. Reads
-    // as a subtle "lens breathing" on the beat — pleasantly fish-eye under
-    // heavy bass without feeling like a gimmick.
-    s.post.lens_warp = (base_lens_warp
-        + scaled_drop * 0.35
-        + s.params.bass * amt * 0.12).clamp(-0.6, 0.9);
-    // Tunnel-glow is now the "tension / release" channel. During build (swell
-    // rising before a drop) we crush the end-of-tunnel halo toward zero so the
-    // tunnel goes pitch black — that build-up look reads great. On the drop
-    // the halo snaps back, brighter than baseline. Silence still empties it.
+    // Radial "speed line" blur: smoothly ramps with drop + ambient bass. Reads
+    // as a hyperdrive streak instead of the cheap lens-warp halo we removed.
+    s.post.radial_blur = (base_radial_blur
+        + scaled_drop * 0.045
+        + s.params.bass * amt * 0.015).clamp(0.0, 0.10);
+    // Tunnel-glow as a tension / release channel. Lull is now the dominant
+    // dimmer (85 % crush on full lull) so quiet sections actually go dark —
+    // the old 30 % factor barely moved the needle on a mid-energy bridge.
+    // Build crush (swell) and drop snap-back layer on top.
     let silence_amt = s.director.silence;
     s.params.tunnel_glow = (base_tunnel_glow
-        * (1.0 - s.director.lull * amt * 0.30)
+        * (1.0 - s.director.lull * amt * 0.85)
         * (1.0 - silence_amt * 0.95)
         * (1.0 - scaled_swell * 0.85).max(0.0)
         * (1.0 + scaled_drop * 0.55)).max(0.0);
@@ -1195,7 +1197,7 @@ fn render_frame(s: &mut AppState) {
     s.post.aberration = base_aberration;
     s.post.contrast = base_contrast;
     s.post.saturation = base_saturation;
-    s.post.lens_warp = base_lens_warp;
+    s.post.radial_blur = base_radial_blur;
     s.params.tunnel_glow = base_tunnel_glow;
     s.params.cam_zoom = base_cam_zoom;
     s.params.density_mul = base_density_mul;

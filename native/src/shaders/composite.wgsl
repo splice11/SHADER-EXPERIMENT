@@ -20,7 +20,7 @@ struct PostParams {
 
     resolution: vec2<f32>,
     fade_in: f32,
-    lens_warp: f32,
+    radial_blur: f32,
 };
 
 @group(0) @binding(0) var scene_tex: texture_2d<f32>;
@@ -56,30 +56,47 @@ fn hash21(p: vec2<f32>) -> f32 {
     return fract((p3.x + p3.y) * p3.z);
 }
 
-// Radial lens distortion. `amount` > 0 = barrel (corners pushed out, fisheye),
-// `amount` < 0 = pincushion (corners pulled in). Range tested ±0.5.
-fn lens_warp_uv(uv: vec2<f32>, amount: f32) -> vec2<f32> {
-    let c = uv - vec2<f32>(0.5);
-    let r2 = dot(c, c);
-    return uv + c * r2 * amount;
-}
-
-fn sample_scene_aberrated(uv_in: vec2<f32>) -> vec3<f32> {
-    let uv = lens_warp_uv(uv_in, P.lens_warp);
-    if (P.aberration <= 0.0001) {
-        return textureSample(scene_tex, scene_smp, uv).rgb;
-    }
+// Radial "speed line" blur: average several samples along the line from this
+// pixel toward the centre of the screen. Reads as a hyperdrive/zoom-streak
+// effect during big drops without sampling outside the frame (so no ugly
+// black halo on the corners the way barrel/pincushion warp does).
+fn sample_scene_radial(uv: vec2<f32>) -> vec3<f32> {
     let center = vec2<f32>(0.5);
     let dir = uv - center;
     let amt = P.aberration * 0.012;
-    let r = textureSample(scene_tex, scene_smp, uv - dir * amt).r;
-    let g = textureSample(scene_tex, scene_smp, uv).g;
-    let b = textureSample(scene_tex, scene_smp, uv + dir * amt).b;
-    return vec3<f32>(r, g, b);
+
+    // Chromatic aberration baseline samples (radial offsets per channel).
+    let uv_r = uv - dir * amt;
+    let uv_g = uv;
+    let uv_b = uv + dir * amt;
+
+    let blur = clamp(P.radial_blur, 0.0, 0.10);
+    if (blur < 1e-4) {
+        let r = textureSample(scene_tex, scene_smp, uv_r).r;
+        let g = textureSample(scene_tex, scene_smp, uv_g).g;
+        let b = textureSample(scene_tex, scene_smp, uv_b).b;
+        return vec3<f32>(r, g, b);
+    }
+
+    // 6 samples toward centre, geometrically spaced — heavier weight near the
+    // original pixel so the result still reads as a sharp image with a streak.
+    var rgb = vec3<f32>(0.0);
+    var w_sum = 0.0;
+    let taps = 6;
+    for (var i = 0; i < taps; i = i + 1) {
+        let s = f32(i) / f32(taps - 1);          // 0..1
+        let push = s * blur;                     // 0..blur
+        let w = exp(-f32(i) * 0.6);
+        let r = textureSample(scene_tex, scene_smp, uv_r - dir * push).r;
+        let g = textureSample(scene_tex, scene_smp, uv_g - dir * push).g;
+        let b = textureSample(scene_tex, scene_smp, uv_b - dir * push).b;
+        rgb = rgb + vec3<f32>(r, g, b) * w;
+        w_sum = w_sum + w;
+    }
+    return rgb / w_sum;
 }
 
-fn sample_bloom_anamorphic(uv_in: vec2<f32>) -> vec3<f32> {
-    let uv = lens_warp_uv(uv_in, P.lens_warp);
+fn sample_bloom_anamorphic(uv: vec2<f32>) -> vec3<f32> {
     let base = textureSample(bloom_tex, bloom_smp, uv).rgb;
     if (P.anamorphic <= 0.0001) {
         return base;
@@ -110,7 +127,7 @@ fn fs_composite(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    let scn = sample_scene_aberrated(uv);
+    let scn = sample_scene_radial(uv);
     let blm = sample_bloom_anamorphic(uv);
 
     var col = (scn + blm * P.intensity) * P.exposure;

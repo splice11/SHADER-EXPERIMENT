@@ -249,9 +249,9 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
                     ui.add(egui::Slider::new(&mut post.anamorphic, 0.0..=1.5));
                     ui.label("chromatic aberration (base)");
                     ui.add(egui::Slider::new(&mut post.aberration, 0.0..=1.5));
-                    ui.label("lens warp (− pincushion / + barrel fisheye)");
-                    ui.add(egui::Slider::new(&mut post.lens_warp, -0.5..=0.7));
-                    ui.small("director adds a barrel pulse on drops + bass.");
+                    ui.label("radial speed blur (hyperdrive streaks)");
+                    ui.add(egui::Slider::new(&mut post.radial_blur, 0.0..=0.10));
+                    ui.small("director adds a streak on drops + ambient bass.");
                 });
 
                 egui::CollapsingHeader::new("bloom + tonemap").default_open(false).show(ui, |ui| {

@@ -284,10 +284,10 @@ impl BakeJob {
             }
             if pm > prev_t && self.next_phrase_idx > 0 {
                 tick.section_changed = true;
-                // Whip kick lives in the director update via section_changed,
-                // but update already ran this frame — apply it directly here.
-                self.director.whip_velocity += 6.0 * self.director.whip_dir;
-                self.director.whip_dir = -self.director.whip_dir;
+                // Director rotation reverses direction on phrase boundaries;
+                // the update() already ran this frame, so flip the target
+                // directly. The dir lerp will catch up over ~4 s.
+                self.director.roll_dir_target = -self.director.roll_dir_target;
             }
             self.next_phrase_idx += 1;
         }
@@ -394,8 +394,12 @@ impl BakeJob {
             self.camera.add_kick([r1 * mag, r2 * mag, 0.0]);
         }
         self.camera.apply_kick_spring(frame_dt);
-        self.camera.roll = self.director.roll_phase.sin() * scaled_swell * 0.035
-            + self.director.whip_angle * amt;
+        // Smooth continuous rotation (mirrors live path).
+        let idle_rate = 0.08_f32;
+        let swell_boost = 0.55_f32;
+        let roll_rate = (idle_rate + scaled_swell * swell_boost)
+            * self.director.roll_dir * amt;
+        self.camera.roll += roll_rate * frame_dt;
 
         // Slowly rotate the cloud-shading light direction (mirrors live).
         self.params.light_phase += frame_dt * 0.09;
@@ -405,7 +409,7 @@ impl BakeJob {
         let base_aberration = self.post.aberration;
         let base_contrast = self.post.contrast;
         let base_saturation = self.post.saturation;
-        let base_lens_warp = self.post.lens_warp;
+        let base_radial_blur = self.post.radial_blur;
         let base_tunnel_glow = self.params.tunnel_glow;
         let base_cam_zoom = self.params.cam_zoom;
         let base_density_mul = self.params.density_mul;
@@ -419,12 +423,13 @@ impl BakeJob {
         self.post.contrast = base_contrast + scaled_drop * 0.08;
         self.post.saturation =
             (base_saturation - self.director.lull * amt * 0.25).max(0.0);
-        self.post.lens_warp = (base_lens_warp
-            + scaled_drop * 0.35
-            + self.params.bass * amt * 0.12).clamp(-0.6, 0.9);
-        // Build → crush tunnel glow to ~0 (tension); drop → snap brighter.
+        self.post.radial_blur = (base_radial_blur
+            + scaled_drop * 0.045
+            + self.params.bass * amt * 0.015).clamp(0.0, 0.10);
+        // Lull is now the dominant tunnel-glow dimmer (mirrors live path)
+        // so quiet sections actually go dark.
         self.params.tunnel_glow = (base_tunnel_glow
-            * (1.0 - self.director.lull * amt * 0.30)
+            * (1.0 - self.director.lull * amt * 0.85)
             * (1.0 - silence * 0.95)
             * (1.0 - scaled_swell * 0.85).max(0.0)
             * (1.0 + scaled_drop * 0.55))
@@ -466,7 +471,7 @@ impl BakeJob {
         self.post.aberration = base_aberration;
         self.post.contrast = base_contrast;
         self.post.saturation = base_saturation;
-        self.post.lens_warp = base_lens_warp;
+        self.post.radial_blur = base_radial_blur;
         self.params.tunnel_glow = base_tunnel_glow;
         self.params.cam_zoom = base_cam_zoom;
         self.params.density_mul = base_density_mul;
