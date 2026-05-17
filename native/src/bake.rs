@@ -296,7 +296,9 @@ impl BakeJob {
 
         let silence = self.director.silence;
         self.post.intensity = base_intensity + scaled_drop * 0.25 + scaled_swell * 0.08;
-        self.post.aberration = base_aberration + scaled_drop * 0.40;
+        self.post.aberration = (base_aberration
+            + scaled_drop * 0.55
+            + self.params.bass * amt * 0.25).clamp(0.0, 1.5);
         self.post.contrast = base_contrast + scaled_drop * 0.08;
         self.post.saturation =
             (base_saturation - self.director.lull * amt * 0.25).max(0.0);

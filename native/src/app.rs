@@ -1108,7 +1108,9 @@ fn render_frame(s: &mut AppState) {
     let base_color_variance = s.params.color_variance;
 
     s.post.intensity = base_intensity + scaled_drop * 0.25 + scaled_swell * 0.08;
-    s.post.aberration = base_aberration + scaled_drop * 0.40;
+    s.post.aberration = (base_aberration
+        + scaled_drop * 0.55
+        + s.params.bass * amt * 0.25).clamp(0.0, 1.5);
     s.post.contrast = base_contrast + scaled_drop * 0.08;
     s.post.saturation = (base_saturation - s.director.lull * amt * 0.25).max(0.0);
     // Lens warp: barrel pulse on drops, smaller bass-driven barrel push. Reads
