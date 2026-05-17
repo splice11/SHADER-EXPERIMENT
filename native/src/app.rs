@@ -325,9 +325,13 @@ pub struct Director {
     // mimicking the look the user discovered by rapidly nudging the slider.
     pub slingshot: f32,
 
-    // Whip-pan: roll spike on section changes; `whip_dir` alternates sign so
-    // consecutive whips don't rotate the camera in the same direction.
-    pub whip_envelope: f32,
+    // Whip-pan via a critically-damped spring on the roll axis: section
+    // changes inject angular velocity (alternating direction) and the spring
+    // arcs the camera through a long, graceful spin before settling back.
+    // Much less "Minecraft hurt animation" than the old exponential-decay
+    // envelope at the cost of a few rad of accumulated rotation.
+    pub whip_angle: f32,
+    pub whip_velocity: f32,
     pub whip_dir: f32,
 
     // Occasional backward-motion intent. `reverse_strength` ramps to 1.0 for
@@ -358,7 +362,8 @@ impl Default for Director {
             auto_palette: false,
             palette_cooldown: 0.0,
             slingshot: 0.0,
-            whip_envelope: 0.0,
+            whip_angle: 0.0,
+            whip_velocity: 0.0,
             whip_dir: 1.0,
             allow_reverse: false,
             reverse_strength: 0.0,
@@ -468,13 +473,17 @@ impl Director {
         self.slingshot = (self.slingshot - dt * 1.2).max(0.0);
         self.slingshot = self.slingshot.max(drop_trigger * 1.6).min(1.0);
 
-        // Whip-pan envelope: spikes to 1.0 on every section change and decays
-        // exponentially over ~0.7 s. Added on top of the slow roll oscillation
-        // so big musical transitions punch the camera sideways. `whip_dir`
-        // alternates so successive whips don't all rotate the same way.
-        self.whip_envelope = self.whip_envelope * (-dt * 3.0).exp();
+        // Critically-damped spring on the whip-roll angle (omega ~1.4 rad/s,
+        // so the natural period is ~4.5 s and a kick decays smoothly). On
+        // section changes we add ~6 rad/s of angular velocity in the
+        // alternating direction — that integrates into roughly 3-5 rad of
+        // rotation (~170°-290°) before the spring eases it back to zero.
+        let omega = 1.4_f32;
+        let accel = -2.0 * omega * self.whip_velocity - omega * omega * self.whip_angle;
+        self.whip_velocity += accel * dt;
+        self.whip_angle += self.whip_velocity * dt;
         if section_changed {
-            self.whip_envelope = 1.0;
+            self.whip_velocity += 6.0 * self.whip_dir;
             self.whip_dir = -self.whip_dir;
         }
 
@@ -1078,10 +1087,9 @@ fn render_frame(s: &mut AppState) {
         s.camera.add_kick([r1 * mag, r2 * mag, 0.0]);
     }
     s.camera.apply_kick_spring(dt);
-    // Roll = slow oscillation (swell-scaled) + whip-pan transient. The whip
-    // term reads as a "snap-zoom rotation" on section changes.
-    let whip_roll = s.director.whip_envelope * s.director.whip_dir * amt * 0.42;
-    s.camera.roll = s.director.roll_phase.sin() * scaled_swell * 0.035 + whip_roll;
+    // Roll = slow oscillation (swell-scaled) + sweeping whip-spin angle.
+    s.camera.roll = s.director.roll_phase.sin() * scaled_swell * 0.035
+        + s.director.whip_angle * amt;
 
     // Slow rotation of the cloud-shading light direction. Breaks up the
     // "always bright top-left, always dark bottom-left" pattern Nimitz's

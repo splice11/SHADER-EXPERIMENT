@@ -277,9 +277,8 @@ impl BakeJob {
             self.camera.add_kick([r1 * mag, r2 * mag, 0.0]);
         }
         self.camera.apply_kick_spring(frame_dt);
-        let whip_roll = self.director.whip_envelope * self.director.whip_dir * amt * 0.42;
-        self.camera.roll =
-            self.director.roll_phase.sin() * scaled_swell * 0.035 + whip_roll;
+        self.camera.roll = self.director.roll_phase.sin() * scaled_swell * 0.035
+            + self.director.whip_angle * amt;
 
         // Slowly rotate the cloud-shading light direction (mirrors live).
         self.params.light_phase += frame_dt * 0.09;
