@@ -105,13 +105,16 @@ pub fn run_bake_chunk(s: &mut AppState) {
     let view = frame.texture.create_view(&Default::default());
 
     let raw = s.egui_state.take_egui_input(&s.renderer.window);
-    let bake_state = s.bake.as_ref().map(|b| (b.frame_index, b.total_frames, b.output_path.clone()));
+    let bake_state = s.bake.as_ref().map(|b| {
+        (b.frame_index, b.total_frames, b.output_path.clone(), b.cue_summary())
+    });
     let full = s.egui_ctx.clone().run(raw, |ctx| {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Baking music video…");
-            if let Some((done, total, path)) = bake_state.as_ref() {
+            if let Some((done, total, path, cue_summary)) = bake_state.as_ref() {
                 let frac = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
                 ui.add(egui::ProgressBar::new(frac).text(format!("{done} / {total}")));
+                ui.small(cue_summary);
                 ui.label(format!("→ {}", path.display()));
                 ui.small("Window may feel sluggish; ffmpeg encodes once frames are piped in.");
             } else {
@@ -257,26 +260,11 @@ impl Camera {
 }
 
 // ---------- music director ----------
-
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub enum DirectorFeel {
-    Off,
-    Subtle,
-    Cinematic,
-    Theatrical,
-}
-
-impl DirectorFeel {
-    /// Multiplier applied at consumption sites (NOT fed back into smoothing).
-    pub fn amount(self) -> f32 {
-        match self {
-            DirectorFeel::Off => 0.0,
-            DirectorFeel::Subtle => 0.5,
-            DirectorFeel::Cinematic => 1.0,
-            DirectorFeel::Theatrical => 1.6,
-        }
-    }
-}
+//
+// One global on/off plus a strength multiplier. The previous 4-way feel enum
+// (Off / Subtle / Cinematic / Theatrical) was just a 0 / 0.5 / 1.0 / 1.6
+// global gain on every output — same behaviour, different volumes, which
+// is why the modes felt indistinguishable.
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Section {
@@ -286,7 +274,11 @@ pub enum Section {
 }
 
 pub struct Director {
-    pub feel: DirectorFeel,
+    /// Master on/off — false disables every modulation.
+    pub enabled: bool,
+    /// Global gain on the director's outputs. 1.0 = nominal; 0..2 in the UI.
+    /// Useful to scale the whole effect without rewriting every coefficient.
+    pub strength: f32,
 
     // smoothed audio
     pub e_short: f32,
@@ -325,9 +317,13 @@ pub struct Director {
     // mimicking the look the user discovered by rapidly nudging the slider.
     pub slingshot: f32,
 
-    // Whip-pan: roll spike on section changes; `whip_dir` alternates sign so
-    // consecutive whips don't rotate the camera in the same direction.
-    pub whip_envelope: f32,
+    // Whip-pan via a critically-damped spring on the roll axis: section
+    // changes inject angular velocity (alternating direction) and the spring
+    // arcs the camera through a long, graceful spin before settling back.
+    // Much less "Minecraft hurt animation" than the old exponential-decay
+    // envelope at the cost of a few rad of accumulated rotation.
+    pub whip_angle: f32,
+    pub whip_velocity: f32,
     pub whip_dir: f32,
 
     // Occasional backward-motion intent. `reverse_strength` ramps to 1.0 for
@@ -342,7 +338,8 @@ pub struct Director {
 impl Default for Director {
     fn default() -> Self {
         Self {
-            feel: DirectorFeel::Subtle,
+            enabled: true,
+            strength: 1.0,
             e_short: 0.0, e_long: 0.0, e_very_long: 0.0,
             punch_baseline: 0.0,
             swell: 0.0, drop: 0.0, lull: 0.0, silence: 0.0,
@@ -358,7 +355,8 @@ impl Default for Director {
             auto_palette: false,
             palette_cooldown: 0.0,
             slingshot: 0.0,
-            whip_envelope: 0.0,
+            whip_angle: 0.0,
+            whip_velocity: 0.0,
             whip_dir: 1.0,
             allow_reverse: false,
             reverse_strength: 0.0,
@@ -468,13 +466,17 @@ impl Director {
         self.slingshot = (self.slingshot - dt * 1.2).max(0.0);
         self.slingshot = self.slingshot.max(drop_trigger * 1.6).min(1.0);
 
-        // Whip-pan envelope: spikes to 1.0 on every section change and decays
-        // exponentially over ~0.7 s. Added on top of the slow roll oscillation
-        // so big musical transitions punch the camera sideways. `whip_dir`
-        // alternates so successive whips don't all rotate the same way.
-        self.whip_envelope = self.whip_envelope * (-dt * 3.0).exp();
+        // Critically-damped spring on the whip-roll angle (omega ~1.4 rad/s,
+        // so the natural period is ~4.5 s and a kick decays smoothly). On
+        // section changes we add ~6 rad/s of angular velocity in the
+        // alternating direction — that integrates into roughly 3-5 rad of
+        // rotation (~170°-290°) before the spring eases it back to zero.
+        let omega = 1.4_f32;
+        let accel = -2.0 * omega * self.whip_velocity - omega * omega * self.whip_angle;
+        self.whip_velocity += accel * dt;
+        self.whip_angle += self.whip_velocity * dt;
         if section_changed {
-            self.whip_envelope = 1.0;
+            self.whip_velocity += 6.0 * self.whip_dir;
             self.whip_dir = -self.whip_dir;
         }
 
@@ -504,6 +506,12 @@ impl Director {
         } else {
             0.0
         }
+    }
+
+    /// Final gain applied to every modulation at the consumption site.
+    /// Replaces the old `feel.amount()` helper.
+    pub fn amount(&self) -> f32 {
+        if self.enabled { self.strength.max(0.0) } else { 0.0 }
     }
 }
 
@@ -712,6 +720,7 @@ pub struct AppState {
     pub bake: Option<BakeJob>,
     pub bake_fps: u32,
     pub bake_size: BakeSize,
+    pub use_cues: bool,
     pub pre_bake_window_size: Option<(u32, u32)>,
     pub palette_crossfade: PaletteCrossfade,
     pub pending_audio_load: Option<std::path::PathBuf>,
@@ -776,6 +785,7 @@ impl ApplicationHandler for App {
             bake: None,
             bake_fps: 60,
             bake_size: BakeSize::Window,
+            use_cues: true,
             pre_bake_window_size: None,
             palette_crossfade: PaletteCrossfade::default(),
             pending_audio_load: None,
@@ -887,6 +897,25 @@ fn render_frame(s: &mut AppState) {
                 s.renderer.resize(bw, bh);
                 s.params.resolution = [bw as f32, bh as f32];
             }
+            // Pre-analysis: cue track (beats, drops, builds, phrases) computed
+            // once over the whole PCM. Cheap relative to the bake itself.
+            let analysis_start = std::time::Instant::now();
+            let cues = if s.use_cues {
+                let pcm = playback.pcm.clone();
+                let sr = playback.sample_rate;
+                let cues = crate::analysis::analyse(&pcm, sr);
+                log::info!(
+                    "pre-analysis ({:.2}s): {:.0} BPM (conf {:.2}), \
+                     {} beats, {} phrases, {} drops, {} builds",
+                    analysis_start.elapsed().as_secs_f32(),
+                    cues.bpm, cues.beat_confidence,
+                    cues.beats.len(), cues.phrase_marks.len(),
+                    cues.drops.len(), cues.builds.len(),
+                );
+                cues
+            } else {
+                crate::analysis::CueTrack::empty()
+            };
             match BakeJob::start(
                 &s.renderer,
                 &audio_path,
@@ -895,11 +924,14 @@ fn render_frame(s: &mut AppState) {
                 s.bake_fps,
                 &s.params,
                 &s.post,
-                s.director.feel,
+                s.director.enabled,
+                s.director.strength,
                 s.scene,
                 s.palette_index,
                 s.use_palette_accent,
                 s.director.auto_palette,
+                s.use_cues,
+                cues,
             ) {
                 Ok(job) => {
                     log::info!(
@@ -949,7 +981,7 @@ fn render_frame(s: &mut AppState) {
     s.params.punch = feat.punch;
 
     let tick = s.director.update(&feat, s.params.time, dt);
-    let amt = s.director.feel.amount();
+    let amt = s.director.amount();
     // All consumption sites scale by `amt` — never mutate director state by it.
     let scaled_swell = (s.director.swell * amt).clamp(0.0, 1.5);
     let scaled_drop = (s.director.drop * amt).clamp(0.0, 1.5);
@@ -1004,6 +1036,7 @@ fn render_frame(s: &mut AppState) {
                 ffmpeg_present,
                 bake_fps: &mut s.bake_fps,
                 bake_size: &mut s.bake_size,
+                use_cues: &mut s.use_cues,
                 pending_audio_load: &mut pending_audio_load,
                 pending_bake: &mut pending_bake,
                 bake_message: &bake_msg,
@@ -1078,10 +1111,9 @@ fn render_frame(s: &mut AppState) {
         s.camera.add_kick([r1 * mag, r2 * mag, 0.0]);
     }
     s.camera.apply_kick_spring(dt);
-    // Roll = slow oscillation (swell-scaled) + whip-pan transient. The whip
-    // term reads as a "snap-zoom rotation" on section changes.
-    let whip_roll = s.director.whip_envelope * s.director.whip_dir * amt * 0.42;
-    s.camera.roll = s.director.roll_phase.sin() * scaled_swell * 0.035 + whip_roll;
+    // Roll = slow oscillation (swell-scaled) + sweeping whip-spin angle.
+    s.camera.roll = s.director.roll_phase.sin() * scaled_swell * 0.035
+        + s.director.whip_angle * amt;
 
     // Slow rotation of the cloud-shading light direction. Breaks up the
     // "always bright top-left, always dark bottom-left" pattern Nimitz's
@@ -1100,7 +1132,9 @@ fn render_frame(s: &mut AppState) {
     let base_color_variance = s.params.color_variance;
 
     s.post.intensity = base_intensity + scaled_drop * 0.25 + scaled_swell * 0.08;
-    s.post.aberration = base_aberration + scaled_drop * 0.40;
+    s.post.aberration = (base_aberration
+        + scaled_drop * 0.55
+        + s.params.bass * amt * 0.25).clamp(0.0, 1.5);
     s.post.contrast = base_contrast + scaled_drop * 0.08;
     s.post.saturation = (base_saturation - s.director.lull * amt * 0.25).max(0.0);
     // Lens warp: barrel pulse on drops, smaller bass-driven barrel push. Reads

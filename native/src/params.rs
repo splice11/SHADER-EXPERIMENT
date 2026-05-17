@@ -187,10 +187,14 @@ impl Default for PostParams {
 
             contrast: 1.08,
             saturation: 1.05,
-            grain: 0.04,
+            // Grain off by default — looked dated; users who want it can dial
+            // it back up in the cinematic panel.
+            grain: 0.0,
             time: 0.0,
 
-            aberration: 0.0,
+            // Strong baseline aberration: gives the lens a permanent "fringe"
+            // and the director adds another big chunk on drops + bass.
+            aberration: 0.6,
             letterbox_aspect: 0.0,
             anamorphic: 0.25,
             vignette: 0.0, // applied in scene shader; this is a post add-on if wanted

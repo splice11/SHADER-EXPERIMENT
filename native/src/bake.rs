@@ -3,6 +3,7 @@
 // output to a capture texture, copies it to a staging buffer, and pipes the
 // bytes into a spawned ffmpeg process that muxes in the source mp3.
 
+use crate::analysis::{analyse, CueTrack};
 use crate::app::{build_bolt_path, hash_u32, Camera, Director, Lightning, PaletteCrossfade, Scene};
 use crate::audio::Features;
 use crate::palettes::PALETTES;
@@ -51,6 +52,15 @@ pub struct BakeJob {
     pub scene: Scene,
     pub use_palette_accent: bool,
     pub palette_crossfade: PaletteCrossfade,
+
+    // Pre-analysis: timestamped musical cues. Cursors track which cues have
+    // already been consumed so we can fire each event exactly once on the
+    // frame when bake-time crosses it.
+    pub cues: CueTrack,
+    pub use_cues: bool,
+    next_drop_idx: usize,
+    next_beat_idx: usize,
+    next_phrase_idx: usize,
 }
 
 /// Length of the start-from-black fade at the head of every bake. Anything
@@ -66,11 +76,14 @@ impl BakeJob {
         fps: u32,
         live_params: &CloudParams,
         live_post: &PostParams,
-        director_feel: crate::app::DirectorFeel,
+        director_enabled: bool,
+        director_strength: f32,
         scene: Scene,
         palette_index: usize,
         use_palette_accent: bool,
         auto_palette: bool,
+        use_cues: bool,
+        cues: CueTrack,
     ) -> Result<Self> {
         if !ffmpeg_available() {
             anyhow::bail!("`ffmpeg` not found on PATH — install it to enable baking");
@@ -144,7 +157,8 @@ impl BakeJob {
         // Deterministic simulation state — director / camera / lightning all
         // start fresh, but keep the user's feel and palette choice.
         let mut director = Director::default();
-        director.feel = director_feel;
+        director.enabled = director_enabled;
+        director.strength = director_strength;
         director.auto_palette = auto_palette;
 
         let mut params = *live_params;
@@ -181,7 +195,102 @@ impl BakeJob {
             scene,
             use_palette_accent,
             palette_crossfade: PaletteCrossfade::default(),
+            cues,
+            use_cues,
+            next_drop_idx: 0,
+            next_beat_idx: 0,
+            next_phrase_idx: 0,
         })
+    }
+
+    /// Lightweight summary the UI can read mid-bake.
+    pub fn cue_summary(&self) -> String {
+        if self.cues.beats.is_empty() && self.cues.drops.is_empty() {
+            return "cues: —".to_string();
+        }
+        format!(
+            "cues: {:.0} BPM (conf {:.2}) · {} beats · {} phrases · {} drops · {} builds",
+            self.cues.bpm,
+            self.cues.beat_confidence,
+            self.cues.beats.len(),
+            self.cues.phrase_marks.len(),
+            self.cues.drops.len(),
+            self.cues.builds.len(),
+        )
+    }
+
+    /// Apply pre-analysis cues that fall in (prev_t, now_t]. Mutates
+    /// `self.director` and the in-flight `tick` so the downstream logic
+    /// (lightning trigger, palette swap, scaled_swell/drop) reads the
+    /// cued values instead of the reactive ones.
+    fn consume_cues(&mut self, prev_t: f32, now_t: f32, tick: &mut crate::app::DirectorTick) {
+        // --- drops: force a hard drop envelope + drop_trigger so lightning,
+        // camera kick, and the existing per-drop side effects all fire.
+        while self.next_drop_idx < self.cues.drops.len() {
+            let dt = self.cues.drops[self.next_drop_idx];
+            if dt > now_t {
+                break;
+            }
+            if dt > prev_t {
+                self.director.drop = 1.0;
+                tick.drop_trigger = tick.drop_trigger.max(0.85);
+            }
+            self.next_drop_idx += 1;
+        }
+
+        // --- builds: while inside one, force `swell` to ramp linearly to 1.0
+        // across the build. The tunnel-glow crush + cam pull-back ride this.
+        for &(start_t, end_t) in &self.cues.builds {
+            if now_t >= start_t && now_t < end_t {
+                let span = (end_t - start_t).max(0.05);
+                let progress = ((now_t - start_t) / span).clamp(0.0, 1.0);
+                // Bias toward the end of the build (quadratic) so the tension
+                // really stacks just before the impact.
+                let shaped = progress * progress;
+                if shaped > self.director.swell {
+                    self.director.swell = shaped;
+                }
+            }
+        }
+
+        // --- beats: advance cursor to current bake-time. The roll phase is
+        // anchored to the beat grid so the slow swell-roll oscillation lines
+        // up with the music's underlying pulse (not a free-running sine).
+        let confident_grid = !self.cues.beats.is_empty()
+            && self.cues.beat_confidence > 0.2
+            && self.cues.beat_period_secs > 0.05;
+        if confident_grid {
+            while self.next_beat_idx < self.cues.beats.len()
+                && self.cues.beats[self.next_beat_idx] <= now_t
+            {
+                self.next_beat_idx += 1;
+            }
+            let last_beat_idx = self.next_beat_idx.saturating_sub(1);
+            let last_beat_t = self.cues.beats[last_beat_idx];
+            let beat_progress = ((now_t - last_beat_t) / self.cues.beat_period_secs)
+                .clamp(0.0, 1.0);
+            // Two beats per full roll cycle (so peaks oscillate L/R on the bar).
+            self.director.roll_phase =
+                (last_beat_idx as f32 + beat_progress) * std::f32::consts::PI;
+        }
+
+        // --- phrase boundaries: act like a forced section change → palette
+        // crossfade (if auto_palette) + whip-pan kick. Skip the very first
+        // phrase mark since the bake starts faded-in from black.
+        while self.next_phrase_idx < self.cues.phrase_marks.len() {
+            let pm = self.cues.phrase_marks[self.next_phrase_idx];
+            if pm > now_t {
+                break;
+            }
+            if pm > prev_t && self.next_phrase_idx > 0 {
+                tick.section_changed = true;
+                // Whip kick lives in the director update via section_changed,
+                // but update already ran this frame — apply it directly here.
+                self.director.whip_velocity += 6.0 * self.director.whip_dir;
+                self.director.whip_dir = -self.director.whip_dir;
+            }
+            self.next_phrase_idx += 1;
+        }
     }
 
     pub fn progress(&self) -> f32 {
@@ -214,8 +323,16 @@ impl BakeJob {
         self.params.rms = features.rms;
         self.params.punch = features.punch;
 
-        let tick = self.director.update(&features, t, frame_dt);
-        let amt = self.director.feel.amount();
+        let mut tick = self.director.update(&features, t, frame_dt);
+        // Authored cues from pre-analysis: when bake-time crosses a known
+        // drop/phrase/beat we *force* the corresponding director envelopes so
+        // lightning + palette + whip-pan + tunnel-glow build land *on* the
+        // music instead of half a beat after the reactive smoothing notices.
+        if self.use_cues {
+            let prev_t = (self.frame_index as f32 - 1.0).max(0.0) * frame_dt;
+            self.consume_cues(prev_t, t, &mut tick);
+        }
+        let amt = self.director.amount();
         let scaled_swell = (self.director.swell * amt).clamp(0.0, 1.5);
         let scaled_drop = (self.director.drop * amt).clamp(0.0, 1.5);
 
@@ -277,9 +394,8 @@ impl BakeJob {
             self.camera.add_kick([r1 * mag, r2 * mag, 0.0]);
         }
         self.camera.apply_kick_spring(frame_dt);
-        let whip_roll = self.director.whip_envelope * self.director.whip_dir * amt * 0.42;
-        self.camera.roll =
-            self.director.roll_phase.sin() * scaled_swell * 0.035 + whip_roll;
+        self.camera.roll = self.director.roll_phase.sin() * scaled_swell * 0.035
+            + self.director.whip_angle * amt;
 
         // Slowly rotate the cloud-shading light direction (mirrors live).
         self.params.light_phase += frame_dt * 0.09;
@@ -297,7 +413,9 @@ impl BakeJob {
 
         let silence = self.director.silence;
         self.post.intensity = base_intensity + scaled_drop * 0.25 + scaled_swell * 0.08;
-        self.post.aberration = base_aberration + scaled_drop * 0.40;
+        self.post.aberration = (base_aberration
+            + scaled_drop * 0.55
+            + self.params.bass * amt * 0.25).clamp(0.0, 1.5);
         self.post.contrast = base_contrast + scaled_drop * 0.08;
         self.post.saturation =
             (base_saturation - self.director.lull * amt * 0.25).max(0.0);
