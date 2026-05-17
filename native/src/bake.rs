@@ -61,6 +61,15 @@ pub struct BakeJob {
     next_drop_idx: usize,
     next_beat_idx: usize,
     next_phrase_idx: usize,
+
+    // HUD overlay: dedicated egui context driven with synthetic input. Renders
+    // a small info panel (track title, BPM, current beat / phrase, palette,
+    // elapsed time) onto the captured frame after the composite pass.
+    pub show_hud: bool,
+    track_title: String,
+    hud_ctx: egui::Context,
+    hud_renderer: egui_wgpu::Renderer,
+    hud_pixels_per_point: f32,
 }
 
 /// Length of the start-from-black fade at the head of every bake. Anything
@@ -84,6 +93,7 @@ impl BakeJob {
         auto_palette: bool,
         use_cues: bool,
         cues: CueTrack,
+        show_hud: bool,
     ) -> Result<Self> {
         if !ffmpeg_available() {
             anyhow::bail!("`ffmpeg` not found on PATH — install it to enable baking");
@@ -173,6 +183,24 @@ impl BakeJob {
         params.quality_steps = 240.0;
         params.quality_step_floor = 0.055;
 
+        // HUD context — independent egui instance so the bake doesn't fight
+        // the live UI for state. Scale fonts up with output height so 4K
+        // doesn't look microscopic.
+        let track_title = audio_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("track")
+            .to_string();
+        let hud_ctx = egui::Context::default();
+        let hud_renderer = egui_wgpu::Renderer::new(
+            &renderer.device,
+            renderer.config.format,
+            None,
+            1,
+            false,
+        );
+        let hud_pixels_per_point = (height as f32 / 1080.0).clamp(1.0, 3.0);
+
         Ok(Self {
             frame_index: 0,
             total_frames,
@@ -200,6 +228,11 @@ impl BakeJob {
             next_drop_idx: 0,
             next_beat_idx: 0,
             next_phrase_idx: 0,
+            show_hud,
+            track_title,
+            hud_ctx,
+            hud_renderer,
+            hud_pixels_per_point,
         })
     }
 
@@ -306,6 +339,166 @@ impl BakeJob {
     }
 
     /// Render and pipe one frame. Returns Ok(true) when the bake just finished.
+    /// Render the in-frame info overlay onto `capture_view`. Cheap — egui
+    /// tessellation + a single textured draw — but runs after the composite
+    /// pass so the text lives on top of all post-processing.
+    fn render_hud(
+        &mut self,
+        renderer: &Renderer,
+        enc: &mut wgpu::CommandEncoder,
+        t: f32,
+    ) {
+        // Pre-compute everything the closure reads so we don't borrow self
+        // mutably and immutably at the same time.
+        let title = self.track_title.clone();
+        let bpm = self.cues.bpm;
+        let confident_grid = !self.cues.beats.is_empty()
+            && self.cues.beat_confidence > 0.2;
+        let beat_idx = if confident_grid { self.next_beat_idx } else { 0 };
+        let phrase_idx = self.next_phrase_idx;
+        let drops_seen = self.next_drop_idx;
+        let palette_name = PALETTES[self.palette_index].name.to_string();
+        let section = format!("{:?}", self.director.section).to_lowercase();
+        let elapsed = t;
+        let total = self.total_frames as f32 / self.fps as f32;
+        let pct = (self.frame_index as f32 / self.total_frames.max(1) as f32) * 100.0;
+        let ppp = self.hud_pixels_per_point;
+        let logical_w = self.width as f32 / ppp;
+        let logical_h = self.height as f32 / ppp;
+
+        let raw_input = egui::RawInput {
+            time: Some(elapsed as f64),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(logical_w, logical_h),
+            )),
+            max_texture_side: Some(2048),
+            ..Default::default()
+        };
+        self.hud_ctx.set_pixels_per_point(ppp);
+
+        let ctx = self.hud_ctx.clone();
+        let full = ctx.run(raw_input, |ctx| {
+            let panel_fill = egui::Color32::from_black_alpha(150);
+            let stroke = egui::Stroke::new(1.0, egui::Color32::from_white_alpha(40));
+            let main_color = egui::Color32::from_white_alpha(230);
+            let dim_color = egui::Color32::from_white_alpha(150);
+
+            // Bottom-left: track title + BPM + structural counters.
+            egui::Area::new("hud-left".into())
+                .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(28.0, -28.0))
+                .interactable(false)
+                .show(ctx, |ui| {
+                    egui::Frame::none()
+                        .fill(panel_fill)
+                        .stroke(stroke)
+                        .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+                        .rounding(8.0)
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(&title)
+                                    .color(main_color)
+                                    .size(18.0)
+                                    .strong(),
+                            );
+                            ui.add_space(2.0);
+                            let bpm_str = if bpm > 30.0 {
+                                format!("{:.0} BPM", bpm)
+                            } else {
+                                "— BPM".to_string()
+                            };
+                            ui.label(
+                                egui::RichText::new(format!("{bpm_str}   ·   {section}"))
+                                    .color(dim_color)
+                                    .size(12.0)
+                                    .monospace(),
+                            );
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "beat {:<5}  phrase {:<3}  drops {}",
+                                    beat_idx, phrase_idx, drops_seen,
+                                ))
+                                .color(dim_color)
+                                .size(12.0)
+                                .monospace(),
+                            );
+                        });
+                });
+
+            // Top-right: palette + elapsed / total + progress %.
+            egui::Area::new("hud-right".into())
+                .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-28.0, 28.0))
+                .interactable(false)
+                .show(ctx, |ui| {
+                    egui::Frame::none()
+                        .fill(panel_fill)
+                        .stroke(stroke)
+                        .inner_margin(egui::Margin::symmetric(14.0, 10.0))
+                        .rounding(8.0)
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(&palette_name)
+                                    .color(main_color)
+                                    .size(14.0)
+                                    .strong(),
+                            );
+                            ui.add_space(2.0);
+                            let e_m = (elapsed as u32) / 60;
+                            let e_s = (elapsed as u32) % 60;
+                            let t_m = (total as u32) / 60;
+                            let t_s = (total as u32) % 60;
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{e_m}:{e_s:02} / {t_m}:{t_s:02}    {pct:>4.0}%"
+                                ))
+                                .color(dim_color)
+                                .size(12.0)
+                                .monospace(),
+                            );
+                        });
+                });
+        });
+
+        let paint_jobs = self.hud_ctx.tessellate(full.shapes, ppp);
+        let screen_desc = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.width, self.height],
+            pixels_per_point: ppp,
+        };
+        for (id, delta) in &full.textures_delta.set {
+            self.hud_renderer
+                .update_texture(&renderer.device, &renderer.queue, *id, delta);
+        }
+        self.hud_renderer.update_buffers(
+            &renderer.device,
+            &renderer.queue,
+            enc,
+            &paint_jobs,
+            &screen_desc,
+        );
+        {
+            let mut rp = enc
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("bake-hud"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.capture_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                })
+                .forget_lifetime();
+            self.hud_renderer.render(&mut rp, &paint_jobs, &screen_desc);
+        }
+        for id in &full.textures_delta.free {
+            self.hud_renderer.free_texture(id);
+        }
+    }
+
     pub fn step(
         &mut self,
         renderer: &Renderer,
@@ -588,6 +781,10 @@ impl BakeJob {
             rp.set_pipeline(&renderer.composite_pipeline);
             rp.set_bind_group(0, &renderer.targets.composite_bind_group, &[]);
             rp.draw(0..3, 0..1);
+        }
+        // Optional HUD overlay → loaded on top of capture_view
+        if self.show_hud {
+            self.render_hud(renderer, &mut enc, t);
         }
         // Texture → staging buffer
         enc.copy_texture_to_buffer(

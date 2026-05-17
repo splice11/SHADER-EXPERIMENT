@@ -19,6 +19,7 @@ pub struct UiCtx<'a> {
     pub bake_fps: &'a mut u32,
     pub bake_size: &'a mut BakeSize,
     pub use_cues: &'a mut bool,
+    pub show_hud: &'a mut bool,
     pub pending_audio_load: &'a mut Option<PathBuf>,
     pub pending_bake: &'a mut Option<PathBuf>,
     pub bake_message: &'a Option<String>,
@@ -28,7 +29,7 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
     let UiCtx {
         p, post, lightning, director, camera,
         palette_index, use_palette_accent, scene,
-        audio, audio_source, ffmpeg_present, bake_fps, bake_size, use_cues,
+        audio, audio_source, ffmpeg_present, bake_fps, bake_size, use_cues, show_hud,
         pending_audio_load, pending_bake, bake_message,
     } = c;
     egui::SidePanel::right("controls")
@@ -128,6 +129,7 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
                         ui.small("pre-analysis adds a few-second pause before bake \
                                   begins to detect beats / drops / phrases / builds, \
                                   then aligns events to them.");
+                        ui.checkbox(show_hud, "burn-in info overlay (track / BPM / palette)");
                         if ui.button("Bake to MP4…").clicked() {
                             if let Some(path) = rfd::FileDialog::new()
                                 .set_file_name("clouds.mp4")

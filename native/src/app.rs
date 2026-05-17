@@ -716,6 +716,7 @@ pub struct AppState {
     pub bake_fps: u32,
     pub bake_size: BakeSize,
     pub use_cues: bool,
+    pub show_hud: bool,
     pub pre_bake_window_size: Option<(u32, u32)>,
     pub palette_crossfade: PaletteCrossfade,
     pub pending_audio_load: Option<std::path::PathBuf>,
@@ -781,6 +782,7 @@ impl ApplicationHandler for App {
             bake_fps: 60,
             bake_size: BakeSize::Window,
             use_cues: true,
+            show_hud: true,
             pre_bake_window_size: None,
             palette_crossfade: PaletteCrossfade::default(),
             pending_audio_load: None,
@@ -927,6 +929,7 @@ fn render_frame(s: &mut AppState) {
                 s.director.auto_palette,
                 s.use_cues,
                 cues,
+                s.show_hud,
             ) {
                 Ok(job) => {
                     log::info!(
@@ -1032,6 +1035,7 @@ fn render_frame(s: &mut AppState) {
                 bake_fps: &mut s.bake_fps,
                 bake_size: &mut s.bake_size,
                 use_cues: &mut s.use_cues,
+                show_hud: &mut s.show_hud,
                 pending_audio_load: &mut pending_audio_load,
                 pending_bake: &mut pending_bake,
                 bake_message: &bake_msg,
