@@ -174,7 +174,7 @@ pub struct PostParams {
 
     pub resolution: [f32; 2],
     pub fade_in: f32,   // 1.0 = normal; <1 = darken final image (used for bake start-from-black)
-    pub _pad1: f32,
+    pub lens_warp: f32, // 0 = none; positive = barrel (fisheye), negative = pincushion
 }
 
 impl Default for PostParams {
@@ -197,7 +197,7 @@ impl Default for PostParams {
 
             resolution: [1.0, 1.0],
             fade_in: 1.0,
-            _pad1: 0.0,
+            lens_warp: 0.0,
         }
     }
 }

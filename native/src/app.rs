@@ -325,6 +325,11 @@ pub struct Director {
     // mimicking the look the user discovered by rapidly nudging the slider.
     pub slingshot: f32,
 
+    // Whip-pan: roll spike on section changes; `whip_dir` alternates sign so
+    // consecutive whips don't rotate the camera in the same direction.
+    pub whip_envelope: f32,
+    pub whip_dir: f32,
+
     // Occasional backward-motion intent. `reverse_strength` ramps to 1.0 for
     // a few seconds when a section change to Peak coincides with a long-enough
     // cooldown, then decays. The speed pipeline maps strength 0→1 onto a
@@ -353,6 +358,8 @@ impl Default for Director {
             auto_palette: false,
             palette_cooldown: 0.0,
             slingshot: 0.0,
+            whip_envelope: 0.0,
+            whip_dir: 1.0,
             allow_reverse: false,
             reverse_strength: 0.0,
             reverse_cooldown: 14.0, // start with a head-start so first peak isn't reversed
@@ -460,6 +467,16 @@ impl Director {
         // gentler decay so the post-pulse "lurch forward" reads.
         self.slingshot = (self.slingshot - dt * 1.2).max(0.0);
         self.slingshot = self.slingshot.max(drop_trigger * 1.6).min(1.0);
+
+        // Whip-pan envelope: spikes to 1.0 on every section change and decays
+        // exponentially over ~0.7 s. Added on top of the slow roll oscillation
+        // so big musical transitions punch the camera sideways. `whip_dir`
+        // alternates so successive whips don't all rotate the same way.
+        self.whip_envelope = self.whip_envelope * (-dt * 3.0).exp();
+        if section_changed {
+            self.whip_envelope = 1.0;
+            self.whip_dir = -self.whip_dir;
+        }
 
         // Reverse: only fires on entry to Peak, with a long cooldown so it
         // stays a "every so often" moment of variety rather than constant.
@@ -1061,7 +1078,10 @@ fn render_frame(s: &mut AppState) {
         s.camera.add_kick([r1 * mag, r2 * mag, 0.0]);
     }
     s.camera.apply_kick_spring(dt);
-    s.camera.roll = s.director.roll_phase.sin() * scaled_swell * 0.035;
+    // Roll = slow oscillation (swell-scaled) + whip-pan transient. The whip
+    // term reads as a "snap-zoom rotation" on section changes.
+    let whip_roll = s.director.whip_envelope * s.director.whip_dir * amt * 0.42;
+    s.camera.roll = s.director.roll_phase.sin() * scaled_swell * 0.035 + whip_roll;
 
     // Slow rotation of the cloud-shading light direction. Breaks up the
     // "always bright top-left, always dark bottom-left" pattern Nimitz's
@@ -1073,6 +1093,7 @@ fn render_frame(s: &mut AppState) {
     let base_aberration = s.post.aberration;
     let base_contrast = s.post.contrast;
     let base_saturation = s.post.saturation;
+    let base_lens_warp = s.post.lens_warp;
     let base_tunnel_glow = s.params.tunnel_glow;
     let base_cam_zoom = s.params.cam_zoom;
     let base_density_mul = s.params.density_mul;
@@ -1082,15 +1103,22 @@ fn render_frame(s: &mut AppState) {
     s.post.aberration = base_aberration + scaled_drop * 0.40;
     s.post.contrast = base_contrast + scaled_drop * 0.08;
     s.post.saturation = (base_saturation - s.director.lull * amt * 0.25).max(0.0);
-    // Silence fades both the clouds and the end-of-tunnel glow toward zero
-    // so a quiet bridge leaves us in an empty dark tunnel; lull contributes a
-    // milder dim on top. Swell/drop on the other hand *push* the tunnel-glow
-    // up so the end-of-tunnel halo blooms harder on peaks.
+    // Lens warp: barrel pulse on drops, smaller bass-driven barrel push. Reads
+    // as a subtle "lens breathing" on the beat — pleasantly fish-eye under
+    // heavy bass without feeling like a gimmick.
+    s.post.lens_warp = (base_lens_warp
+        + scaled_drop * 0.35
+        + s.params.bass * amt * 0.12).clamp(-0.6, 0.9);
+    // Tunnel-glow is now the "tension / release" channel. During build (swell
+    // rising before a drop) we crush the end-of-tunnel halo toward zero so the
+    // tunnel goes pitch black — that build-up look reads great. On the drop
+    // the halo snaps back, brighter than baseline. Silence still empties it.
     let silence_amt = s.director.silence;
     s.params.tunnel_glow = (base_tunnel_glow
         * (1.0 - s.director.lull * amt * 0.30)
         * (1.0 - silence_amt * 0.95)
-        * (1.0 + scaled_swell * 0.45 + scaled_drop * 0.25)).max(0.0);
+        * (1.0 - scaled_swell * 0.85).max(0.0)
+        * (1.0 + scaled_drop * 0.55)).max(0.0);
     // Density: silence empties the tunnel; swell/drop thicken the clouds on
     // peaks; lull thins them on quiet passages.
     s.params.density_mul = (base_density_mul
@@ -1133,6 +1161,7 @@ fn render_frame(s: &mut AppState) {
     s.post.aberration = base_aberration;
     s.post.contrast = base_contrast;
     s.post.saturation = base_saturation;
+    s.post.lens_warp = base_lens_warp;
     s.params.tunnel_glow = base_tunnel_glow;
     s.params.cam_zoom = base_cam_zoom;
     s.params.density_mul = base_density_mul;

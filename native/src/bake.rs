@@ -277,7 +277,9 @@ impl BakeJob {
             self.camera.add_kick([r1 * mag, r2 * mag, 0.0]);
         }
         self.camera.apply_kick_spring(frame_dt);
-        self.camera.roll = self.director.roll_phase.sin() * scaled_swell * 0.035;
+        let whip_roll = self.director.whip_envelope * self.director.whip_dir * amt * 0.42;
+        self.camera.roll =
+            self.director.roll_phase.sin() * scaled_swell * 0.035 + whip_roll;
 
         // Slowly rotate the cloud-shading light direction (mirrors live).
         self.params.light_phase += frame_dt * 0.09;
@@ -287,6 +289,7 @@ impl BakeJob {
         let base_aberration = self.post.aberration;
         let base_contrast = self.post.contrast;
         let base_saturation = self.post.saturation;
+        let base_lens_warp = self.post.lens_warp;
         let base_tunnel_glow = self.params.tunnel_glow;
         let base_cam_zoom = self.params.cam_zoom;
         let base_density_mul = self.params.density_mul;
@@ -298,10 +301,15 @@ impl BakeJob {
         self.post.contrast = base_contrast + scaled_drop * 0.08;
         self.post.saturation =
             (base_saturation - self.director.lull * amt * 0.25).max(0.0);
+        self.post.lens_warp = (base_lens_warp
+            + scaled_drop * 0.35
+            + self.params.bass * amt * 0.12).clamp(-0.6, 0.9);
+        // Build → crush tunnel glow to ~0 (tension); drop → snap brighter.
         self.params.tunnel_glow = (base_tunnel_glow
             * (1.0 - self.director.lull * amt * 0.30)
             * (1.0 - silence * 0.95)
-            * (1.0 + scaled_swell * 0.45 + scaled_drop * 0.25))
+            * (1.0 - scaled_swell * 0.85).max(0.0)
+            * (1.0 + scaled_drop * 0.55))
             .max(0.0);
         // Density: silence empties the tunnel; swell/drop swell it up so peaks
         // get visibly thicker clouds; lull pulls density down to "thin haze".
@@ -340,6 +348,7 @@ impl BakeJob {
         self.post.aberration = base_aberration;
         self.post.contrast = base_contrast;
         self.post.saturation = base_saturation;
+        self.post.lens_warp = base_lens_warp;
         self.params.tunnel_glow = base_tunnel_glow;
         self.params.cam_zoom = base_cam_zoom;
         self.params.density_mul = base_density_mul;
