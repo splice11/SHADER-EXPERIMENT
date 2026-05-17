@@ -41,8 +41,8 @@ struct Params {
 
     quality_steps: f32,
     quality_step_floor: f32,
-    _pad_extra1: f32,
-    _pad_extra2: f32,
+    bolt_invert: f32,
+    light_phase: f32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -189,25 +189,35 @@ fn render_clouds(
             col = col * (den * den * den);
             col = vec4<f32>(col.rgb * (linstep(4.0, -2.5, mpv.x) * 2.3), col.a);
 
-            var dif = clamp((den - map_fn(pos + 0.8, prm1, itime).x) / 9.0, 0.001, 1.0);
-            dif = dif + clamp((den - map_fn(pos + 0.35, prm1, itime).x) / 2.5, 0.001, 1.0);
+            // Shading samples a "shadow" direction relative to the current
+            // voxel. The original shader used a fixed scalar offset which
+            // made bright spots cluster in the same screen quadrant the whole
+            // animation — rotating light_phase on the CPU keeps highlights
+            // wandering so different cloud regions get to be the dark ones.
+            let lp = P.light_phase;
+            let light_dir = vec3<f32>(cos(lp), sin(lp * 0.7) * 0.6, sin(lp));
+            var dif = clamp((den - map_fn(pos + light_dir * 0.8,  prm1, itime).x) / 9.0, 0.001, 1.0);
+            dif = dif + clamp((den - map_fn(pos + light_dir * 0.35, prm1, itime).x) / 2.5, 0.001, 1.0);
             let shade = vec3<f32>(0.005, 0.045, 0.075)
                 + 1.5 * vec3<f32>(0.033, 0.07, 0.03) * dif;
             col = vec4<f32>(col.xyz * den * shade, col.a);
         }
 
-        // 3D bolt: cheap emissive accumulation. Core is the visible filament;
-        // glow is a soft radial falloff into the surrounding cloud. The old
-        // shadow-march "god rays" path was expensive and didn't read well on
-        // most strikes, so it's been removed.
+        // 3D bolt: cheap emissive accumulation. `bolt_invert` continuously
+        // blends from a bright emissive bolt to a "shadow" bolt that carves
+        // darkness through the clouds instead — an inverted strike effect.
         if (flash_on) {
             let bd = bolt_dist3(pos);
             let core = exp(-bd / max(P.bolt_width, 1e-4));
             let glow = exp(-bd * 0.55) * clamp(den * 1.6, 0.0, 1.0);
-            let emit = P.flash_color * P.flash_strength
-                * (core * P.bolt_intensity + glow * P.bolt_glow);
-            let tinted = saturate_color(emit, P.bolt_saturation);
-            col = vec4<f32>(col.rgb + tinted, max(col.a, core * 0.1));
+            let mag = (core * P.bolt_intensity + glow * P.bolt_glow) * P.flash_strength;
+            let invert = clamp(P.bolt_invert, 0.0, 1.0);
+            let emit_rgb = saturate_color(P.flash_color * mag, P.bolt_saturation);
+            let positive = emit_rgb * (1.0 - invert);
+            let negative = vec3<f32>(mag) * invert * 1.4;
+            let new_rgb = max(col.rgb + positive - negative, vec3<f32>(0.0));
+            // Alpha: bright bolts cement the cloud, shadow bolts don't claim opacity.
+            col = vec4<f32>(new_rgb, max(col.a, core * 0.1 * (1.0 - invert)));
         }
 
         let fog_c = exp(t * 0.2 - 2.2);
@@ -260,7 +270,16 @@ fn fs_clouds(in: VsOut) -> @location(0) vec4<f32> {
     let p = (frag_coord - 0.5 * P.resolution) / P.resolution.y * P.cam_zoom;
 
     let itime = P.time;
-    let prm1_base = smoothstep(-0.4, 0.4, sin(itime * 0.3));
+    // Multi-octave morph driver: three sines at different rates summed, then
+    // softened through a smoothstep. Adds more "steps" of fluffiness over a
+    // long sweep so dense and wispy moments interleave organically instead of
+    // ramping linearly with one sine wave. Weights are chosen so the sum stays
+    // in [-1, 1] and the smoothstep maps it back to [0, 1].
+    let m_lo  = sin(itime * 0.13);
+    let m_mid = sin(itime * 0.31 + 1.7) * 0.55;
+    let m_hi  = sin(itime * 0.78 + 4.3) * 0.20;
+    let m_sum = (m_lo + m_mid + m_hi) / 1.75;
+    let prm1_base = smoothstep(-0.55, 0.55, m_sum);
     // morph_cap controls how plumey/closed the tunnel can get. The original
     // shader allowed prm1 up to 1.6 which produces wall-of-cloud moments —
     // capping ~1.0 keeps the tunnel breathable.

@@ -20,7 +20,7 @@ struct PostParams {
 
     resolution: vec2<f32>,
     fade_in: f32,
-    _pad1: f32,
+    lens_warp: f32,
 };
 
 @group(0) @binding(0) var scene_tex: texture_2d<f32>;
@@ -56,7 +56,16 @@ fn hash21(p: vec2<f32>) -> f32 {
     return fract((p3.x + p3.y) * p3.z);
 }
 
-fn sample_scene_aberrated(uv: vec2<f32>) -> vec3<f32> {
+// Radial lens distortion. `amount` > 0 = barrel (corners pushed out, fisheye),
+// `amount` < 0 = pincushion (corners pulled in). Range tested ±0.5.
+fn lens_warp_uv(uv: vec2<f32>, amount: f32) -> vec2<f32> {
+    let c = uv - vec2<f32>(0.5);
+    let r2 = dot(c, c);
+    return uv + c * r2 * amount;
+}
+
+fn sample_scene_aberrated(uv_in: vec2<f32>) -> vec3<f32> {
+    let uv = lens_warp_uv(uv_in, P.lens_warp);
     if (P.aberration <= 0.0001) {
         return textureSample(scene_tex, scene_smp, uv).rgb;
     }
@@ -69,7 +78,8 @@ fn sample_scene_aberrated(uv: vec2<f32>) -> vec3<f32> {
     return vec3<f32>(r, g, b);
 }
 
-fn sample_bloom_anamorphic(uv: vec2<f32>) -> vec3<f32> {
+fn sample_bloom_anamorphic(uv_in: vec2<f32>) -> vec3<f32> {
+    let uv = lens_warp_uv(uv_in, P.lens_warp);
     let base = textureSample(bloom_tex, bloom_smp, uv).rgb;
     if (P.anamorphic <= 0.0001) {
         return base;

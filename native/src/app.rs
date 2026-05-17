@@ -319,6 +319,24 @@ pub struct Director {
     // palette auto-rotation
     pub auto_palette: bool,
     pub palette_cooldown: f32, // seconds since last auto-swap
+
+    // "Slingshot" envelope: rises on drops, decays slowly. Drives a transient
+    // follow-inertia inflation so the camera briefly lags then catches up,
+    // mimicking the look the user discovered by rapidly nudging the slider.
+    pub slingshot: f32,
+
+    // Whip-pan: roll spike on section changes; `whip_dir` alternates sign so
+    // consecutive whips don't rotate the camera in the same direction.
+    pub whip_envelope: f32,
+    pub whip_dir: f32,
+
+    // Occasional backward-motion intent. `reverse_strength` ramps to 1.0 for
+    // a few seconds when a section change to Peak coincides with a long-enough
+    // cooldown, then decays. The speed pipeline maps strength 0→1 onto a
+    // motion factor of +1→−1, so a peak flips direction for variety.
+    pub allow_reverse: bool,
+    pub reverse_strength: f32,
+    pub reverse_cooldown: f32, // seconds remaining before another reverse may fire
 }
 
 impl Default for Director {
@@ -339,6 +357,12 @@ impl Default for Director {
             seed: 1,
             auto_palette: false,
             palette_cooldown: 0.0,
+            slingshot: 0.0,
+            whip_envelope: 0.0,
+            whip_dir: 1.0,
+            allow_reverse: false,
+            reverse_strength: 0.0,
+            reverse_cooldown: 14.0, // start with a head-start so first peak isn't reversed
         }
     }
 }
@@ -437,6 +461,39 @@ impl Director {
 
         self.roll_phase += dt * 0.13;
         self.palette_cooldown += dt;
+
+        // Slingshot: each drop pulses an envelope that the camera path uses
+        // to briefly inflate `follow_secs`. Fast attack (max with the drop),
+        // gentler decay so the post-pulse "lurch forward" reads.
+        self.slingshot = (self.slingshot - dt * 1.2).max(0.0);
+        self.slingshot = self.slingshot.max(drop_trigger * 1.6).min(1.0);
+
+        // Whip-pan envelope: spikes to 1.0 on every section change and decays
+        // exponentially over ~0.7 s. Added on top of the slow roll oscillation
+        // so big musical transitions punch the camera sideways. `whip_dir`
+        // alternates so successive whips don't all rotate the same way.
+        self.whip_envelope = self.whip_envelope * (-dt * 3.0).exp();
+        if section_changed {
+            self.whip_envelope = 1.0;
+            self.whip_dir = -self.whip_dir;
+        }
+
+        // Reverse: only fires on entry to Peak, with a long cooldown so it
+        // stays a "every so often" moment of variety rather than constant.
+        self.reverse_cooldown = (self.reverse_cooldown - dt).max(0.0);
+        if self.allow_reverse
+            && section_changed
+            && self.section == Section::Peak
+            && self.reverse_cooldown <= 0.0
+        {
+            self.reverse_strength = 1.0;
+            self.reverse_cooldown = 28.0;
+        }
+        // Hold for ~2.2 s then decay linearly over ~3 s.
+        if self.reverse_strength > 0.0 {
+            let release_rate = if self.reverse_cooldown > 25.8 { 0.0 } else { 1.0 / 3.0 };
+            self.reverse_strength = (self.reverse_strength - dt * release_rate).max(0.0);
+        }
 
         DirectorTick { drop_trigger, section_changed }
     }
@@ -988,10 +1045,30 @@ fn render_frame(s: &mut AppState) {
     }
 
     // ---- camera (uses user-set s.params.speed, which is now the post-UI value) ----
-    let speed = (s.params.speed + s.params.bass * s.params.bass_to_speed
-        + scaled_swell * 0.9).max(0.0);
+    // Speed pipeline:
+    //   * peaks/swell push forward harder (visualise intense moments)
+    //   * lulls drag the floor down so quiet sections feel slow / suspended
+    //   * `reverse_factor` flips sign during the (rare) reverse pulse so the
+    //     director occasionally pulls us backward for variety
+    //   * `slingshot` inflates follow inertia transiently — the camera stalls
+    //     on a beat and then catches up to the moving target = forward whip
+    let lull_drag = s.director.lull * amt * 1.4;
+    let speed_swell = scaled_swell * 1.8;
+    let base_speed_mod = (s.params.speed - lull_drag).max(0.0);
+    let reverse_factor = 1.0 - 2.0 * s.director.reverse_strength * amt;
+    let speed = ((base_speed_mod
+        + s.params.bass * s.params.bass_to_speed
+        + speed_swell) * reverse_factor).clamp(-14.0, 18.0);
     s.camera.integrate(speed, dt);
+
+    let base_sway = s.camera.sway_amp;
+    let base_follow = s.camera.follow_secs;
+    s.camera.sway_amp = base_sway * (1.0 + scaled_swell * 0.6 + scaled_drop * 0.25);
+    s.camera.follow_secs = (base_follow * (1.0 + s.director.slingshot * amt * 4.0))
+        .min(2.5);
     s.camera.smooth_follow(dt);
+    s.camera.sway_amp = base_sway;
+    s.camera.follow_secs = base_follow;
 
     if tick.drop_trigger > 0.05 {
         let r1 = hash_u32(s.director.seed, 11) - 0.5;
@@ -1001,34 +1078,65 @@ fn render_frame(s: &mut AppState) {
         s.camera.add_kick([r1 * mag, r2 * mag, 0.0]);
     }
     s.camera.apply_kick_spring(dt);
-    s.camera.roll = s.director.roll_phase.sin() * scaled_swell * 0.035;
+    // Roll = slow oscillation (swell-scaled) + whip-pan transient. The whip
+    // term reads as a "snap-zoom rotation" on section changes.
+    let whip_roll = s.director.whip_envelope * s.director.whip_dir * amt * 0.42;
+    s.camera.roll = s.director.roll_phase.sin() * scaled_swell * 0.035 + whip_roll;
+
+    // Slow rotation of the cloud-shading light direction. Breaks up the
+    // "always bright top-left, always dark bottom-left" pattern Nimitz's
+    // fixed-offset shadow taps produce.
+    s.params.light_phase += dt * 0.09;
 
     // ---- save user bases, apply director modulation ----
     let base_intensity = s.post.intensity;
     let base_aberration = s.post.aberration;
     let base_contrast = s.post.contrast;
     let base_saturation = s.post.saturation;
+    let base_lens_warp = s.post.lens_warp;
     let base_tunnel_glow = s.params.tunnel_glow;
     let base_cam_zoom = s.params.cam_zoom;
     let base_density_mul = s.params.density_mul;
+    let base_color_variance = s.params.color_variance;
 
     s.post.intensity = base_intensity + scaled_drop * 0.25 + scaled_swell * 0.08;
     s.post.aberration = base_aberration + scaled_drop * 0.40;
     s.post.contrast = base_contrast + scaled_drop * 0.08;
     s.post.saturation = (base_saturation - s.director.lull * amt * 0.25).max(0.0);
-    // Silence fades both the clouds and the end-of-tunnel glow toward zero
-    // so a quiet bridge leaves us in an empty dark tunnel; lull contributes a
-    // milder dim on top. Both knobs are restored at end-of-frame so the UI
-    // sliders show the user's base value.
+    // Lens warp: barrel pulse on drops, smaller bass-driven barrel push. Reads
+    // as a subtle "lens breathing" on the beat — pleasantly fish-eye under
+    // heavy bass without feeling like a gimmick.
+    s.post.lens_warp = (base_lens_warp
+        + scaled_drop * 0.35
+        + s.params.bass * amt * 0.12).clamp(-0.6, 0.9);
+    // Tunnel-glow is now the "tension / release" channel. During build (swell
+    // rising before a drop) we crush the end-of-tunnel halo toward zero so the
+    // tunnel goes pitch black — that build-up look reads great. On the drop
+    // the halo snaps back, brighter than baseline. Silence still empties it.
     let silence_amt = s.director.silence;
     s.params.tunnel_glow = (base_tunnel_glow
         * (1.0 - s.director.lull * amt * 0.30)
-        * (1.0 - silence_amt * 0.95)).max(0.0);
-    s.params.density_mul = base_density_mul * (1.0 - silence_amt * 0.95);
+        * (1.0 - silence_amt * 0.95)
+        * (1.0 - scaled_swell * 0.85).max(0.0)
+        * (1.0 + scaled_drop * 0.55)).max(0.0);
+    // Density: silence empties the tunnel; swell/drop thicken the clouds on
+    // peaks; lull thins them on quiet passages.
+    s.params.density_mul = (base_density_mul
+        * (1.0 - silence_amt * 0.95)
+        * (1.0 + scaled_swell * 0.35 + scaled_drop * 0.20)
+        * (1.0 - s.director.lull * amt * 0.30))
+        .max(0.0);
     // Pull-back zoom: swell/drop widen the FOV so peaks feel airy rather than
     // claustrophobic. (Previously this multiplied < 1.0, which zoomed *in* and
     // never read as the cam_zoom slider doing anything during peaks.)
     s.params.cam_zoom = base_cam_zoom * (1.0 + scaled_swell * 0.22 + scaled_drop * 0.08);
+    // Colour variance: pulls UP on peaks (puffs get more individuated, more
+    // depth) and DOWN on lulls (clouds calm to a single hue) — clamped to the
+    // slider range so the director can't push it past 1.5.
+    s.params.color_variance = (base_color_variance
+        * (1.0 + scaled_swell * 0.55 + scaled_drop * 0.20)
+        * (1.0 - s.director.lull * amt * 0.40))
+        .clamp(0.0, 1.5);
     // Live quality: keep the loop modest so weak GPUs stay above 60 fps. The
     // bake job overrides these (and grain-free fade-in) for the recorded video.
     s.params.quality_steps = 140.0;
@@ -1053,9 +1161,11 @@ fn render_frame(s: &mut AppState) {
     s.post.aberration = base_aberration;
     s.post.contrast = base_contrast;
     s.post.saturation = base_saturation;
+    s.post.lens_warp = base_lens_warp;
     s.params.tunnel_glow = base_tunnel_glow;
     s.params.cam_zoom = base_cam_zoom;
     s.params.density_mul = base_density_mul;
+    s.params.color_variance = base_color_variance;
 
     let frame = match s.renderer.surface.get_current_texture() {
         Ok(f) => f,

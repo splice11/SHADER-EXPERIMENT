@@ -77,8 +77,8 @@ pub struct CloudParams {
     // job bumps them so the recorded video gets crisp clouds at 1440p+.
     pub quality_steps: f32,       // max raymarch iterations (cap 320 in shader)
     pub quality_step_floor: f32,  // minimum per-step distance
-    pub _pad_extra1: f32,
-    pub _pad_extra2: f32,
+    pub bolt_invert: f32,         // 0 = bright bolts, 1 = "shadow" bolts that darken clouds
+    pub light_phase: f32,         // radians — CPU-rotated so shading highlights don't stay on the same screen quadrant
 }
 
 impl Default for CloudParams {
@@ -94,13 +94,18 @@ impl Default for CloudParams {
 
             speed: 3.0, morph: 0.0, density_mul: 1.0, hue_shift: 0.0,
 
-            bass_to_speed: 3.0,
-            bass_to_morph: 0.30,
+            // Bass-route gains default to 0 — the music director already
+            // adds intensity via swell/drop, and double-modulation from
+            // bass-on-top-of-bass tended to feel busy.
+            bass_to_speed: 0.0,
+            bass_to_morph: 0.0,
             centroid_to_hue: 0.0,
             rms_to_density: 0.45,
 
             cam_pos: [0.0, 0.0, 0.0],
-            cam_zoom: 1.0,
+            // Wide default zoom — the airy "high FOV, pulled back" look reads
+            // better at 1440p than the tight 1.0 default.
+            cam_zoom: 2.0,
             cam_right: [1.0, 0.0, 0.0],
             _pad3: 0.0,
             cam_up: [0.0, 1.0, 0.0],
@@ -133,8 +138,8 @@ impl Default for CloudParams {
             bolt_saturation: 1.6,
             quality_steps: 140.0,
             quality_step_floor: 0.085,
-            _pad_extra1: 0.0,
-            _pad_extra2: 0.0,
+            bolt_invert: 0.0,
+            light_phase: 0.0,
         }
     }
 }
@@ -169,7 +174,7 @@ pub struct PostParams {
 
     pub resolution: [f32; 2],
     pub fade_in: f32,   // 1.0 = normal; <1 = darken final image (used for bake start-from-black)
-    pub _pad1: f32,
+    pub lens_warp: f32, // 0 = none; positive = barrel (fisheye), negative = pincushion
 }
 
 impl Default for PostParams {
@@ -192,7 +197,7 @@ impl Default for PostParams {
 
             resolution: [1.0, 1.0],
             fade_in: 1.0,
-            _pad1: 0.0,
+            lens_warp: 0.0,
         }
     }
 }
