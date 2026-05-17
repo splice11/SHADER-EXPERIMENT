@@ -105,13 +105,16 @@ pub fn run_bake_chunk(s: &mut AppState) {
     let view = frame.texture.create_view(&Default::default());
 
     let raw = s.egui_state.take_egui_input(&s.renderer.window);
-    let bake_state = s.bake.as_ref().map(|b| (b.frame_index, b.total_frames, b.output_path.clone()));
+    let bake_state = s.bake.as_ref().map(|b| {
+        (b.frame_index, b.total_frames, b.output_path.clone(), b.cue_summary())
+    });
     let full = s.egui_ctx.clone().run(raw, |ctx| {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Baking music video…");
-            if let Some((done, total, path)) = bake_state.as_ref() {
+            if let Some((done, total, path, cue_summary)) = bake_state.as_ref() {
                 let frac = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
                 ui.add(egui::ProgressBar::new(frac).text(format!("{done} / {total}")));
+                ui.small(cue_summary);
                 ui.label(format!("→ {}", path.display()));
                 ui.small("Window may feel sluggish; ffmpeg encodes once frames are piped in.");
             } else {
@@ -717,6 +720,7 @@ pub struct AppState {
     pub bake: Option<BakeJob>,
     pub bake_fps: u32,
     pub bake_size: BakeSize,
+    pub use_cues: bool,
     pub pre_bake_window_size: Option<(u32, u32)>,
     pub palette_crossfade: PaletteCrossfade,
     pub pending_audio_load: Option<std::path::PathBuf>,
@@ -781,6 +785,7 @@ impl ApplicationHandler for App {
             bake: None,
             bake_fps: 60,
             bake_size: BakeSize::Window,
+            use_cues: true,
             pre_bake_window_size: None,
             palette_crossfade: PaletteCrossfade::default(),
             pending_audio_load: None,
@@ -892,6 +897,25 @@ fn render_frame(s: &mut AppState) {
                 s.renderer.resize(bw, bh);
                 s.params.resolution = [bw as f32, bh as f32];
             }
+            // Pre-analysis: cue track (beats, drops, builds, phrases) computed
+            // once over the whole PCM. Cheap relative to the bake itself.
+            let analysis_start = std::time::Instant::now();
+            let cues = if s.use_cues {
+                let pcm = playback.pcm.clone();
+                let sr = playback.sample_rate;
+                let cues = crate::analysis::analyse(&pcm, sr);
+                log::info!(
+                    "pre-analysis ({:.2}s): {:.0} BPM (conf {:.2}), \
+                     {} beats, {} phrases, {} drops, {} builds",
+                    analysis_start.elapsed().as_secs_f32(),
+                    cues.bpm, cues.beat_confidence,
+                    cues.beats.len(), cues.phrase_marks.len(),
+                    cues.drops.len(), cues.builds.len(),
+                );
+                cues
+            } else {
+                crate::analysis::CueTrack::empty()
+            };
             match BakeJob::start(
                 &s.renderer,
                 &audio_path,
@@ -906,6 +930,8 @@ fn render_frame(s: &mut AppState) {
                 s.palette_index,
                 s.use_palette_accent,
                 s.director.auto_palette,
+                s.use_cues,
+                cues,
             ) {
                 Ok(job) => {
                     log::info!(
@@ -1010,6 +1036,7 @@ fn render_frame(s: &mut AppState) {
                 ffmpeg_present,
                 bake_fps: &mut s.bake_fps,
                 bake_size: &mut s.bake_size,
+                use_cues: &mut s.use_cues,
                 pending_audio_load: &mut pending_audio_load,
                 pending_bake: &mut pending_bake,
                 bake_message: &bake_msg,
