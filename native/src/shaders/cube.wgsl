@@ -41,8 +41,8 @@ struct Params {
 
     quality_steps: f32,
     quality_step_floor: f32,
-    _pad_extra1: f32,
-    _pad_extra2: f32,
+    bolt_invert: f32,
+    light_phase: f32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;

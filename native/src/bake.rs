@@ -249,13 +249,26 @@ impl BakeJob {
             self.params.bolt_count = 0.0;
         }
 
-        // Camera (uses fixed frame_dt for deterministic integration).
-        let speed = (self.params.speed
+        // Camera — same pipeline as the live path: lull drags speed down,
+        // swell pushes it up, reverse_strength flips sign occasionally.
+        let lull_drag = self.director.lull * amt * 1.4;
+        let speed_swell = scaled_swell * 1.8;
+        let base_speed_mod = (self.params.speed - lull_drag).max(0.0);
+        let reverse_factor = 1.0 - 2.0 * self.director.reverse_strength * amt;
+        let speed = ((base_speed_mod
             + self.params.bass * self.params.bass_to_speed
-            + scaled_swell * 0.9)
-            .max(0.0);
+            + speed_swell) * reverse_factor).clamp(-14.0, 18.0);
         self.camera.integrate(speed, frame_dt);
+
+        let base_sway = self.camera.sway_amp;
+        let base_follow = self.camera.follow_secs;
+        self.camera.sway_amp = base_sway * (1.0 + scaled_swell * 0.6 + scaled_drop * 0.25);
+        self.camera.follow_secs =
+            (base_follow * (1.0 + self.director.slingshot * amt * 4.0)).min(2.5);
         self.camera.smooth_follow(frame_dt);
+        self.camera.sway_amp = base_sway;
+        self.camera.follow_secs = base_follow;
+
         if tick.drop_trigger > 0.05 {
             let r1 = hash_u32(self.director.seed, 11) - 0.5;
             let r2 = hash_u32(self.director.seed, 23) - 0.5;
@@ -266,6 +279,9 @@ impl BakeJob {
         self.camera.apply_kick_spring(frame_dt);
         self.camera.roll = self.director.roll_phase.sin() * scaled_swell * 0.035;
 
+        // Slowly rotate the cloud-shading light direction (mirrors live).
+        self.params.light_phase += frame_dt * 0.09;
+
         // Director modulation.
         let base_intensity = self.post.intensity;
         let base_aberration = self.post.aberration;
@@ -274,6 +290,7 @@ impl BakeJob {
         let base_tunnel_glow = self.params.tunnel_glow;
         let base_cam_zoom = self.params.cam_zoom;
         let base_density_mul = self.params.density_mul;
+        let base_color_variance = self.params.color_variance;
 
         let silence = self.director.silence;
         self.post.intensity = base_intensity + scaled_drop * 0.25 + scaled_swell * 0.08;
@@ -283,12 +300,24 @@ impl BakeJob {
             (base_saturation - self.director.lull * amt * 0.25).max(0.0);
         self.params.tunnel_glow = (base_tunnel_glow
             * (1.0 - self.director.lull * amt * 0.30)
-            * (1.0 - silence * 0.95))
+            * (1.0 - silence * 0.95)
+            * (1.0 + scaled_swell * 0.45 + scaled_drop * 0.25))
             .max(0.0);
-        self.params.density_mul = base_density_mul * (1.0 - silence * 0.95);
+        // Density: silence empties the tunnel; swell/drop swell it up so peaks
+        // get visibly thicker clouds; lull pulls density down to "thin haze".
+        self.params.density_mul = (base_density_mul
+            * (1.0 - silence * 0.95)
+            * (1.0 + scaled_swell * 0.35 + scaled_drop * 0.20)
+            * (1.0 - self.director.lull * amt * 0.30))
+            .max(0.0);
         // Pull-back zoom on swell/drop (mirrors the live path).
         self.params.cam_zoom =
             base_cam_zoom * (1.0 + scaled_swell * 0.22 + scaled_drop * 0.08);
+        // Colour variance follows the energy curve.
+        self.params.color_variance = (base_color_variance
+            * (1.0 + scaled_swell * 0.55 + scaled_drop * 0.20)
+            * (1.0 - self.director.lull * amt * 0.40))
+            .clamp(0.0, 1.5);
         // Start the video from black: ramp fade_in from 0 → 1 over the first
         // BAKE_FADE_IN_SECS seconds so the simulation isn't visibly mid-stride
         // when the music kicks in.
@@ -314,6 +343,7 @@ impl BakeJob {
         self.params.tunnel_glow = base_tunnel_glow;
         self.params.cam_zoom = base_cam_zoom;
         self.params.density_mul = base_density_mul;
+        self.params.color_variance = base_color_variance;
         // Note: we intentionally don't restore post.fade_in — it's a derived
         // bake-only knob the live UI never reads.
 

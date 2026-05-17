@@ -158,6 +158,12 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
                     ));
                     ui.checkbox(&mut director.auto_palette,
                         "auto-rotate palettes on section changes");
+                    ui.checkbox(&mut director.allow_reverse,
+                        "occasional backward sections on peaks");
+                    ui.small("director also drives: speed (faster on peaks, \
+                              slower on lulls), camera sway/zoom, follow inertia \
+                              slingshot on drops, density, colour variance, \
+                              tunnel glow.");
                 });
 
                 egui::CollapsingHeader::new("camera").default_open(true).show(ui, |ui| {
@@ -215,6 +221,8 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
                     ui.add(egui::Slider::new(&mut p.bolt_glow, 0.0..=4.0));
                     ui.label("bolt colour saturation");
                     ui.add(egui::Slider::new(&mut p.bolt_saturation, 0.0..=3.0));
+                    ui.label("invert (shadow bolts that darken clouds)");
+                    ui.add(egui::Slider::new(&mut p.bolt_invert, 0.0..=1.0));
                     color_picker(ui, "flash colour", &mut p.flash_color);
                 });
 
