@@ -265,6 +265,12 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
                     ui.add(egui::Slider::new(&mut post.intensity, 0.0..=2.0));
                     ui.label("exposure");
                     ui.add(egui::Slider::new(&mut post.exposure, 0.1..=4.0));
+                    ui.label("black point (inky shadow crush)");
+                    ui.add(egui::Slider::new(&mut post.black_point, 0.0..=0.30));
+                    ui.label("highlight softness (peaks → white)");
+                    ui.add(egui::Slider::new(&mut post.highlight_softness, 0.0..=1.0));
+                    ui.small("0 = peaks keep colour (may neon-clip), \
+                              1 = peaks fully desaturate at the shoulder.");
                 });
 
                 egui::CollapsingHeader::new("motion").default_open(false).show(ui, |ui| {
