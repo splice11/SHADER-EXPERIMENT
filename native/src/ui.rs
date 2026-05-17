@@ -1,4 +1,4 @@
-use crate::app::{BakeSize, Camera, Director, DirectorFeel, Lightning, Scene};
+use crate::app::{BakeSize, Camera, Director, Lightning, Scene};
 use crate::audio::Audio;
 use crate::palettes::PALETTES;
 use crate::params::{CloudParams, PostParams};
@@ -139,12 +139,10 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
                 });
 
                 egui::CollapsingHeader::new("director").default_open(true).show(ui, |ui| {
+                    ui.checkbox(&mut director.enabled, "director enabled");
                     ui.horizontal(|ui| {
-                        ui.label("feel");
-                        ui.selectable_value(&mut director.feel, DirectorFeel::Off, "Off");
-                        ui.selectable_value(&mut director.feel, DirectorFeel::Subtle, "Subtle");
-                        ui.selectable_value(&mut director.feel, DirectorFeel::Cinematic, "Cinema");
-                        ui.selectable_value(&mut director.feel, DirectorFeel::Theatrical, "Theatre");
+                        ui.label("strength");
+                        ui.add(egui::Slider::new(&mut director.strength, 0.0..=2.0));
                     });
                     bar(ui, "swell", director.swell);
                     bar(ui, "drop", director.drop);

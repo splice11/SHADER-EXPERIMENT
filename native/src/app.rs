@@ -257,26 +257,11 @@ impl Camera {
 }
 
 // ---------- music director ----------
-
-#[derive(Copy, Clone, PartialEq, Eq)]
-pub enum DirectorFeel {
-    Off,
-    Subtle,
-    Cinematic,
-    Theatrical,
-}
-
-impl DirectorFeel {
-    /// Multiplier applied at consumption sites (NOT fed back into smoothing).
-    pub fn amount(self) -> f32 {
-        match self {
-            DirectorFeel::Off => 0.0,
-            DirectorFeel::Subtle => 0.5,
-            DirectorFeel::Cinematic => 1.0,
-            DirectorFeel::Theatrical => 1.6,
-        }
-    }
-}
+//
+// One global on/off plus a strength multiplier. The previous 4-way feel enum
+// (Off / Subtle / Cinematic / Theatrical) was just a 0 / 0.5 / 1.0 / 1.6
+// global gain on every output — same behaviour, different volumes, which
+// is why the modes felt indistinguishable.
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Section {
@@ -286,7 +271,11 @@ pub enum Section {
 }
 
 pub struct Director {
-    pub feel: DirectorFeel,
+    /// Master on/off — false disables every modulation.
+    pub enabled: bool,
+    /// Global gain on the director's outputs. 1.0 = nominal; 0..2 in the UI.
+    /// Useful to scale the whole effect without rewriting every coefficient.
+    pub strength: f32,
 
     // smoothed audio
     pub e_short: f32,
@@ -346,7 +335,8 @@ pub struct Director {
 impl Default for Director {
     fn default() -> Self {
         Self {
-            feel: DirectorFeel::Subtle,
+            enabled: true,
+            strength: 1.0,
             e_short: 0.0, e_long: 0.0, e_very_long: 0.0,
             punch_baseline: 0.0,
             swell: 0.0, drop: 0.0, lull: 0.0, silence: 0.0,
@@ -513,6 +503,12 @@ impl Director {
         } else {
             0.0
         }
+    }
+
+    /// Final gain applied to every modulation at the consumption site.
+    /// Replaces the old `feel.amount()` helper.
+    pub fn amount(&self) -> f32 {
+        if self.enabled { self.strength.max(0.0) } else { 0.0 }
     }
 }
 
@@ -904,7 +900,8 @@ fn render_frame(s: &mut AppState) {
                 s.bake_fps,
                 &s.params,
                 &s.post,
-                s.director.feel,
+                s.director.enabled,
+                s.director.strength,
                 s.scene,
                 s.palette_index,
                 s.use_palette_accent,
@@ -958,7 +955,7 @@ fn render_frame(s: &mut AppState) {
     s.params.punch = feat.punch;
 
     let tick = s.director.update(&feat, s.params.time, dt);
-    let amt = s.director.feel.amount();
+    let amt = s.director.amount();
     // All consumption sites scale by `amt` — never mutate director state by it.
     let scaled_swell = (s.director.swell * amt).clamp(0.0, 1.5);
     let scaled_drop = (s.director.drop * amt).clamp(0.0, 1.5);

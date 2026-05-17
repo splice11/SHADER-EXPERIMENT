@@ -66,7 +66,8 @@ impl BakeJob {
         fps: u32,
         live_params: &CloudParams,
         live_post: &PostParams,
-        director_feel: crate::app::DirectorFeel,
+        director_enabled: bool,
+        director_strength: f32,
         scene: Scene,
         palette_index: usize,
         use_palette_accent: bool,
@@ -144,7 +145,8 @@ impl BakeJob {
         // Deterministic simulation state — director / camera / lightning all
         // start fresh, but keep the user's feel and palette choice.
         let mut director = Director::default();
-        director.feel = director_feel;
+        director.enabled = director_enabled;
+        director.strength = director_strength;
         director.auto_palette = auto_palette;
 
         let mut params = *live_params;
@@ -215,7 +217,7 @@ impl BakeJob {
         self.params.punch = features.punch;
 
         let tick = self.director.update(&features, t, frame_dt);
-        let amt = self.director.feel.amount();
+        let amt = self.director.amount();
         let scaled_swell = (self.director.swell * amt).clamp(0.0, 1.5);
         let scaled_drop = (self.director.drop * amt).clamp(0.0, 1.5);
 
