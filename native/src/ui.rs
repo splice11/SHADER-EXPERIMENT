@@ -1,4 +1,4 @@
-use crate::app::{Camera, Director, DirectorFeel, Lightning, Scene};
+use crate::app::{BakeSize, Camera, Director, DirectorFeel, Lightning, Scene};
 use crate::audio::Audio;
 use crate::palettes::PALETTES;
 use crate::params::{CloudParams, PostParams};
@@ -17,6 +17,7 @@ pub struct UiCtx<'a> {
     pub audio_source: &'a str,
     pub ffmpeg_present: bool,
     pub bake_fps: &'a mut u32,
+    pub bake_size: &'a mut BakeSize,
     pub pending_audio_load: &'a mut Option<PathBuf>,
     pub pending_bake: &'a mut Option<PathBuf>,
     pub bake_message: &'a Option<String>,
@@ -26,7 +27,7 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
     let UiCtx {
         p, post, lightning, director, camera,
         palette_index, use_palette_accent, scene,
-        audio, audio_source, ffmpeg_present, bake_fps,
+        audio, audio_source, ffmpeg_present, bake_fps, bake_size,
         pending_audio_load, pending_bake, bake_message,
     } = c;
     egui::SidePanel::right("controls")
@@ -104,8 +105,24 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
                             ui.selectable_value(bake_fps, 30, "30");
                             ui.selectable_value(bake_fps, 60, "60");
                         });
-                        ui.small(format!("output size = window size: {}×{}",
-                            p.resolution[0] as u32, p.resolution[1] as u32));
+                        ui.horizontal(|ui| {
+                            ui.label("size");
+                            ui.selectable_value(bake_size, BakeSize::Window, BakeSize::Window.label());
+                            ui.selectable_value(bake_size, BakeSize::P1080, BakeSize::P1080.label());
+                            ui.selectable_value(bake_size, BakeSize::P1440, BakeSize::P1440.label());
+                            ui.selectable_value(bake_size, BakeSize::P2160, BakeSize::P2160.label());
+                        });
+                        let win_w = p.resolution[0] as u32;
+                        let win_h = p.resolution[1] as u32;
+                        let (bw, bh) = bake_size.dimensions((win_w, win_h));
+                        if (bw, bh) == (win_w, win_h) {
+                            ui.small(format!("output: {}×{} (window)", bw, bh));
+                        } else {
+                            ui.small(format!(
+                                "output: {}×{} (render targets resize during bake)", bw, bh,
+                            ));
+                        }
+                        ui.small("bake uses higher cloud detail than the live preview.");
                         if ui.button("Bake to MP4…").clicked() {
                             if let Some(path) = rfd::FileDialog::new()
                                 .set_file_name("clouds.mp4")
@@ -178,10 +195,8 @@ pub fn build_ctx(ctx: &egui::Context, c: UiCtx<'_>) {
                     ui.small("director lull dims this on quiet sections.");
                     ui.label("plumey cap (limits how closed the tunnel gets)");
                     ui.add(egui::Slider::new(&mut p.morph_cap, 0.30..=1.6));
-                    ui.label("colour variance (per-puff hue spread)");
+                    ui.label("colour variance (per-puff hue spread — adds depth)");
                     ui.add(egui::Slider::new(&mut p.color_variance, 0.0..=1.5));
-                    ui.label("god ray strength (cloud shadowing during strikes)");
-                    ui.add(egui::Slider::new(&mut p.god_ray_strength, 0.0..=4.0));
                 });
 
                 egui::CollapsingHeader::new("lightning").default_open(true).show(ui, |ui| {

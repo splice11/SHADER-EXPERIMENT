@@ -73,8 +73,10 @@ pub struct CloudParams {
     pub color_variance: f32,
     pub bolt_saturation: f32,
 
-    pub god_ray_strength: f32,
-    pub _pad_extra0: f32,
+    // Render-only quality knobs. The live app keeps these modest; the bake
+    // job bumps them so the recorded video gets crisp clouds at 1440p+.
+    pub quality_steps: f32,       // max raymarch iterations (cap 320 in shader)
+    pub quality_step_floor: f32,  // minimum per-step distance
     pub _pad_extra1: f32,
     pub _pad_extra2: f32,
 }
@@ -129,8 +131,8 @@ impl Default for CloudParams {
             morph_cap: 0.95,
             color_variance: 0.40,
             bolt_saturation: 1.6,
-            god_ray_strength: 1.0,
-            _pad_extra0: 0.0,
+            quality_steps: 140.0,
+            quality_step_floor: 0.085,
             _pad_extra1: 0.0,
             _pad_extra2: 0.0,
         }
@@ -166,7 +168,7 @@ pub struct PostParams {
     pub vignette: f32,
 
     pub resolution: [f32; 2],
-    pub _pad0: f32,
+    pub fade_in: f32,   // 1.0 = normal; <1 = darken final image (used for bake start-from-black)
     pub _pad1: f32,
 }
 
@@ -189,7 +191,7 @@ impl Default for PostParams {
             vignette: 0.0, // applied in scene shader; this is a post add-on if wanted
 
             resolution: [1.0, 1.0],
-            _pad0: 0.0,
+            fade_in: 1.0,
             _pad1: 0.0,
         }
     }
